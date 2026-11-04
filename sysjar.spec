@@ -1,6 +1,6 @@
 Name:		sysjar
 Version:	0.1.0
-Release:	1
+Release:	2
 Summary:	Build Maven and Gradle projects against system jars
 Group:		Development/Java
 License:	MIT
@@ -44,7 +44,9 @@ install -d %{buildroot}%{_rpmmacrodir}
 install -d %{buildroot}%{_rpmconfigdir}/fileattrs
 install -m0755 bin/sysjar %{buildroot}%{_bindir}/sysjar
 install -m0644 sysjar/*.py %{buildroot}%{_datadir}/sysjar/lib/sysjar/
-install -m0644 macros.sysjar %{buildroot}%{_rpmmacrodir}/macros.sysjar
+# zzz- sorts after macros.zzz-jpb-dola-dbs, which otherwise replaces
+# the maven buildsystem when javapackages-bootstrap is installed.
+install -m0644 macros.sysjar %{buildroot}%{_rpmmacrodir}/macros.zzz-sysjar
 install -m0644 sysjar.attr %{buildroot}%{_rpmconfigdir}/fileattrs/sysjar.attr
 install -m0755 sysjardeps %{buildroot}%{_rpmconfigdir}/sysjardeps
 install -m0644 sysjar.1 %{buildroot}%{_mandir}/man1/sysjar.1
@@ -59,7 +61,7 @@ install -m0644 sysjar.1 %{buildroot}%{_mandir}/man1/sysjar.1
 %dir %{_datadir}/sysjar/index
 %dir %{_datadir}/sysjar/lib
 %{_datadir}/sysjar/lib/sysjar
-%{_rpmmacrodir}/macros.sysjar
+%{_rpmmacrodir}/macros.zzz-sysjar
 %{_rpmconfigdir}/fileattrs/sysjar.attr
 %{_rpmconfigdir}/sysjardeps
 %{_mandir}/man1/sysjar.1*
