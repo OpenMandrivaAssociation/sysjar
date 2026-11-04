@@ -1,0 +1,3 @@
+%__sysjar_provides	%{_rpmconfigdir}/sysjardeps --provides
+%__sysjar_requires	%{_rpmconfigdir}/sysjardeps --requires
+%__sysjar_path	^%{_datadir}/sysjar/index/.+\\.sysjar$

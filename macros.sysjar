@@ -1,0 +1,182 @@
+# Build Java projects against jars installed as system packages.
+# The rest of the line is passed to the tool. Examples:
+#   %sysjar_mvn -DskipTests package
+#   %sysjar_gradle build -x test
+#   %sysjar_ant
+#   %sysjar_install --file-name demo
+
+# Optional spec globals, expanded when the launcher runs:
+#   sysjar_bootstrap        pass --bootstrap (stage-0 metadata under each root)
+#   sysjar_bootstrap_root   pass --bootstrap-root (an extracted tree)
+#   sysjar_extra            extra arguments before the drops, usually --root
+#   _sysjar_mvn             pass --mvn PATH
+#   _sysjar_gradle          pass --gradle PATH
+#   _sysjar_ant             pass --ant PATH
+#   _sysjar_java_version    pin a JDK major; unset keeps the latest
+#   _sysjar_java_home       pin a JAVA_HOME path; overrides the version path
+#   sysjar_drops            extra arguments, usually repeated --drop group:artifact
+# Names with a leading underscore are not the launcher macros themselves.
+# A spec that sets sysjar_drops still leaves sysjar_extra for the command line.
+%__sysjar_mode %{?sysjar_bootstrap:--bootstrap} %{?sysjar_bootstrap_root:--bootstrap-root %{sysjar_bootstrap_root}} %{?sysjar_extra} %{?sysjar_drops}
+
+%sysjar_mvn sysjar mvn %__sysjar_mode %{?_sysjar_mvn:--mvn %{_sysjar_mvn}} --
+
+%sysjar_gradle sysjar gradle %__sysjar_mode %{?_sysjar_gradle:--gradle %{_sysjar_gradle}} --
+
+%sysjar_ant sysjar ant %__sysjar_mode %{?_sysjar_ant:--ant %{_sysjar_ant}} --
+
+%sysjar_ivy sysjar ivy %__sysjar_mode --
+
+# Install jars found next to pom.xml files, reactor records written by
+# a sysjar gradle build, or an ivy.xml module.
+%sysjar_install sysjar install --buildroot %{buildroot} --auto --filelist .mfiles
+
+# Declarative specs: BuildSystem: maven, gradle, ant or ivy.
+# Rpm calls these as parametric macros and puts BuildOption words after --.
+# %sysjar_mvn and the other launchers already end with --, so a section
+# appends those words and does not add a second --.
+# A bare BuildOption is the conf section. It is saved and passed to %build.
+
+%__sysjar_save_conf() \
+	mkdir -p .sysjar \
+	: > .sysjar/conf.args \
+	for __sysjar_arg in %*; do \
+		echo "$__sysjar_arg" >> .sysjar/conf.args \
+	done
+
+%__sysjar_load_conf() \
+	if [ -f .sysjar/conf.args ]; then \
+		while IFS= read -r __sysjar_arg; do \
+			set -- "$@" "$__sysjar_arg" \
+		done < .sysjar/conf.args \
+	fi
+
+# Append %* when every word so far is a flag (starts with "-").
+%__sysjar_default_goal() \
+	__sysjar_goal=0 \
+	for __sysjar_arg in "$@"; do \
+		case "$__sysjar_arg" in \
+			-*) ;; \
+			*) __sysjar_goal=1 ;; \
+		esac \
+	done \
+	if [ "$__sysjar_goal" -eq 0 ]; then \
+		set -- "$@" %* \
+	fi
+
+%__sysjar_generate_buildrequires() \
+	sysjar builddep --allow-missing -q %__sysjar_mode %* .
+
+%__sysjar_install_section() \
+	case " %* " in \
+	*" --artifact "*|*" --artifact="*) \
+		sysjar install --buildroot %{buildroot} --filelist .mfiles %* \
+		;; \
+	*) \
+		%sysjar_install %* \
+		;; \
+	esac
+
+# Latest JDK unless a spec sets _sysjar_java_version. Do not set either macro
+# here: a %global would hide %{!?...} in a spec. Pin a version only when a
+# tool cannot read the current class-file major. _sysjar_java_home is a path
+# override and does not change the package names. %check is a separate script,
+# so each section exports JAVA_HOME again.
+%_sysjar_java_buildrequires %{?_sysjar_java_version:java-%{_sysjar_java_version}-openjdk-devel}%{!?_sysjar_java_version:java-current-devel}
+%_sysjar_java_requires %{?_sysjar_java_version:java-%{_sysjar_java_version}-openjdk}%{!?_sysjar_java_version:java-current}
+%__sysjar_use_java_home %{?_sysjar_java_home:export JAVA_HOME="%{_sysjar_java_home}"}%{!?_sysjar_java_home:%{?_sysjar_java_version:export JAVA_HOME="%{_jvmdir}/java-%{_sysjar_java_version}-openjdk"}%{!?_sysjar_java_version:export JAVA_HOME="$JAVA_HOME"}}
+
+# Maven. %build skips tests. %check runs them when the spec has %bcond_without tests.
+
+# A spec that defines sysjar_bootstrap is built with javapackages-bootstrap
+# instead of the maven package. Maven itself uses that while bootstrapping.
+%buildsystem_maven_buildrequires	%{?sysjar_bootstrap:javapackages-bootstrap}%{!?sysjar_bootstrap:maven} %{_sysjar_java_buildrequires}
+
+%buildsystem_maven_generate_buildrequires() %__sysjar_generate_buildrequires -- %*
+
+%buildsystem_maven_conf() %__sysjar_save_conf -- %*
+
+%buildsystem_maven_build() \
+	%__sysjar_use_java_home \
+	export MAVEN_SKIP_RC=1 \
+	set -- -Dmaven.test.skip=true \
+	%__sysjar_load_conf \
+	set -- "$@" %* \
+	%__sysjar_default_goal -- package \
+	%sysjar_mvn "$@"
+
+%buildsystem_maven_install() %__sysjar_install_section -- %*
+
+%buildsystem_maven_check() \
+%if %{with tests} \
+	%__sysjar_use_java_home \
+	set -- -Dmaven.test.skip=false \
+	set -- "$@" %* \
+	%__sysjar_default_goal -- test \
+	%sysjar_mvn "$@" \
+%endif
+
+# Gradle. assemble builds the jars and does not run tests.
+
+%buildsystem_gradle_buildrequires	gradle %{_sysjar_java_buildrequires}
+
+%buildsystem_gradle_generate_buildrequires() %__sysjar_generate_buildrequires -- %*
+
+%buildsystem_gradle_conf() %__sysjar_save_conf -- %*
+
+%buildsystem_gradle_build() \
+	%__sysjar_use_java_home \
+	set -- \
+	%__sysjar_load_conf \
+	set -- "$@" %* \
+	%__sysjar_default_goal -- assemble \
+	%sysjar_gradle "$@"
+
+%buildsystem_gradle_install() %__sysjar_install_section -- %*
+
+%buildsystem_gradle_check() \
+%if %{with tests} \
+	%__sysjar_use_java_home \
+	set -- \
+	set -- "$@" %* \
+	%__sysjar_default_goal -- test \
+	%sysjar_gradle "$@" \
+%endif
+
+# Ant. Ivy is the same build, with modules rewritten onto the system repo.
+
+%buildsystem_ant_buildrequires	ant %{_sysjar_java_buildrequires}
+
+%buildsystem_ant_generate_buildrequires() %__sysjar_generate_buildrequires -- %*
+
+%buildsystem_ant_conf() %__sysjar_save_conf -- %*
+
+%buildsystem_ant_build() \
+	%__sysjar_use_java_home \
+	set -- \
+	%__sysjar_load_conf \
+	set -- "$@" %* \
+	%sysjar_ant "$@"
+
+%buildsystem_ant_install() %__sysjar_install_section -- %*
+
+%buildsystem_ant_check() \
+%if %{with tests} \
+	%__sysjar_use_java_home \
+	set -- \
+	set -- "$@" %* \
+	%__sysjar_default_goal -- test \
+	%sysjar_ant "$@" \
+%endif
+
+%buildsystem_ivy_buildrequires	ant %{_sysjar_java_buildrequires}
+
+%buildsystem_ivy_generate_buildrequires() %buildsystem_ant_generate_buildrequires -- %*
+
+%buildsystem_ivy_conf() %buildsystem_ant_conf -- %*
+
+%buildsystem_ivy_build() %buildsystem_ant_build -- %*
+
+%buildsystem_ivy_install() %buildsystem_ant_install -- %*
+
+%buildsystem_ivy_check() %buildsystem_ant_check -- %*

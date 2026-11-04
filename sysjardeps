@@ -1,0 +1,29 @@
+#!/usr/bin/python
+"""RPM dependency generator for /usr/share/sysjar/index/*.sysjar."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "/usr/share/sysjar/lib")
+
+from sysjar.rpmmeta import load_record, open_packaged, provides_for, requires_for
+
+
+def main() -> int:
+    provides = "--provides" in sys.argv or "-P" in sys.argv
+    paths = [line.strip() for line in sys.stdin if line.strip()]
+    if not paths:
+        paths = [arg for arg in sys.argv[1:] if not arg.startswith("-")]
+    for raw in paths:
+        path = open_packaged(raw)
+        if not path.is_file():
+            continue
+        data = load_record(Path(path))
+        lines = provides_for(data) if provides else requires_for(data)
+        for line in lines:
+            print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

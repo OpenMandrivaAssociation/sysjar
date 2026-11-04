@@ -1,0 +1,15 @@
+#!/usr/bin/python
+import sys
+from pathlib import Path
+
+here = Path(__file__).resolve().parent
+candidates = [here.parent, here.parent / "lib", Path("/usr/share/sysjar/lib")]
+for candidate in candidates:
+    if (candidate / "sysjar" / "cli.py").is_file():
+        sys.path.insert(0, str(candidate))
+        break
+
+from sysjar.cli import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

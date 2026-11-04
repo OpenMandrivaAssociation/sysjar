@@ -1,0 +1,423 @@
+.TH SYSJAR 1 "November 2026" "OpenMandriva" "System jars"
+.SH NAME
+sysjar \- build Maven, Gradle, Ant and Ivy projects against system jars
+.SH SYNOPSIS
+.B sysjar
+.RI [ command ]
+.RI [ options ]
+.RB [ --
+.IR "tool arguments" ]
+.SH DESCRIPTION
+.B sysjar
+treats jars installed by the distribution as shared libraries. A project
+that asks Maven or Gradle for
+.I org.slf4j:slf4j-api:1.7.25
+is built against the one
+.I slf4j-api
+jar the distribution shipped, whatever version that jar is. Nothing is
+downloaded. The build fails with the name of each missing library instead
+of reaching the network.
+.PP
+Installed libraries are read from
+.I /usr/share/sysjar/index/*/*.sysjar
+and, for packages built before sysjar, from XMvn fragments in
+.IR /usr/share/maven-metadata .
+Jars stay in
+.I /usr/share/java
+and POMs in
+.IR /usr/share/maven-poms .
+One coordinate has one version. A newer
+.I .sysjar
+record replaces a legacy fragment of the same coordinate.
+.SH COMMANDS
+.TP
+.B list
+Print groupId:artifactId, the system version, and the file.
+.TP
+.BI resolve " COORD"
+Print the jar or POM for
+.I COORD
+and ignore the version the caller asked for.
+.I COORD
+is
+.IR group:artifact[:version][:classifier][@type] .
+.TP
+.BI classpath " COORD..."
+Print a colon-separated classpath.
+.TP
+.B repo --dest DIR
+Write a Maven repository of symlinks to system jars. POMs in that
+repository have their dependency versions rewritten to system versions.
+The default destination is
+.IR /var/cache/sysjar/m2 .
+.TP
+.B rewrite PATH
+Rewrite
+.I pom.xml
+and
+.I ivy.xml
+files under
+.I PATH
+so known libraries use the system version. Reactor modules are left
+alone.
+.B --drop
+.I group:artifact
+removes that dependency or plugin.
+.TP
+.B mvn -- \fIMVN-ARGS\fR
+Rewrite the project, write a private repository and settings, and run
+Maven against only that repository.
+.B --drop
+.I group:artifact
+removes that dependency or plugin from the project and from parent POMs
+published into the private repository, so a plugin that arrives only
+through a parent profile is removed there too. Maven is not passed
+.BR -o :
+that switch ignores a file repository as well as the network. The
+settings mirror every repository at the private one, so a missing jar
+fails the build instead of being downloaded. A missing compile or runtime dependency
+stops the command before Maven starts.
+A plugin or build extension that is not installed is removed from the
+project being built, except a plugin that produces the main artifact
+(compiler, resources, jar, war, ear, assembly, shade, antrun, bundle,
+build-helper, moditect, and the plugin plugin). A pluginManagement
+entry that only pins a version stays. One that declares executions is
+removed when the plugin is not installed, because Maven resolves it
+while loading the project. A reporting plugin that is not installed is
+removed too. The removed plugin is reported. It does not run.
+An import-scoped BOM that is not installed is removed. Maven resolves
+it while building the model. Other dependencyManagement entries stay.
+A test-scoped dependency that is not installed is removed for the same
+reason: Maven resolves it even when tests are skipped. An installed
+test dependency stays. A provided dependency stays, because the
+compiler can import it.
+A dependency POM copied into the private repository loses those same
+uninstalled plugins.
+.B --drop
+still removes a plugin that this leaves in place, including one that
+produces the main artifact. Maven's built-in lifecycle plugins are pointed at the
+installed jar. Compiler source, target and release values below 8 are
+raised to 8, including in those published POMs, because current JDKs
+reject the older levels. Raw
+.B -source
+and
+.B -target
+entries in a compiler plugin's
+.B compilerArguments
+are removed. javac rejects them together with
+.BR --release ,
+and the plugin already passes the language level.
+.B com.sun:tools
+and
+.B jdk.tools:jdk.tools
+are removed: they are the JDK, not a jar. A version written as exactly
+SNAPSHOT becomes 0-SNAPSHOT.
+.B --allow-missing
+continues anyway. Test-scoped gaps are warnings.
+.B --mvn
+.I PATH
+selects the Maven launcher. The default is
+.B mvn
+on
+.BR PATH .
+.TP
+.B gradle -- \fIGRADLE-ARGS\fR
+Run Gradle
+.B --offline
+with an init script that forces system versions and a private Gradle
+user home. The init script also writes
+.I .sysjar/reactor/*.json
+when the
+.B java
+plugin's
+.B jar
+task runs, which
+.B install --auto
+reads afterwards.
+.B --keep-repos
+leaves repositories declared by the build in place.
+.B --user-home
+uses the default Gradle home.
+.B --gradle
+.I PATH
+selects the Gradle launcher.
+.TP
+.B ant -- \fIANT-ARGS\fR
+Rewrite
+.I ivy.xml
+files, write
+.I ivysettings.xml
+for the system repository, and run Ant. Ant is given
+.B -Divy.settings.file
+when the tree has an Ivy module. A project that has no
+.I ivysettings.xml
+gets one beside each
+.IR ivy.xml ,
+which is the file a plain
+.B ivy:resolve
+loads. An existing
+.I ivysettings.xml
+is left in place. A
+.I build.xml
+that names its own settings file ignores
+.BR -Divy.settings.file .
+.B --ant
+.I PATH
+selects the Ant launcher. The default target is the one in
+.IR build.xml .
+A later
+.B -f
+overrides the build file sysjar selected.
+.TP
+.B ivy
+Rewrite Ivy revisions and write
+.I ivysettings.xml
+for the system repository.
+.TP
+.B install --buildroot DIR
+Copy a jar and POM into the buildroot and write the
+.I .sysjar
+record RPM uses for dependencies.
+.B --auto
+discovers reactor POMs, Gradle records, or an Ivy module.
+.B --artifact
+.I POM[:JAR]
+selects one artifact.
+.B --alias
+.I group:artifact
+adds another name for that same jar.
+.B --file-name
+sets the file name under
+.IR /usr/share/java .
+.B --link
+.I NAME
+adds a symlink of that name, without
+.IR .jar .
+It is a file name, not another Maven coordinate.
+.B --filelist
+.I FILE
+writes the rpm
+.B %files
+list: the jar, its symlinks, the POM, and the index file.
+.B %sysjar_install
+passes
+.BR --filelist\ .mfiles .
+.TP
+.B scan PATH
+Show each dependency and whether a system jar provides it. Gradle
+files are scanned as text, so those lines are marked heuristic.
+.TP
+.B builddep PATH
+Print
+.B BuildRequires
+lines. Exits 1 when something is not installed. The lines are still
+printed, so they can be pasted into a spec.
+.B --allow-missing
+exits 0 after printing them.
+.TP
+.B check
+Report index entries whose jar or POM is not on disk.
+.TP
+.BR provides ", " requires
+Print RPM dependency lines for one
+.I .sysjar
+file. The same scripts are wired up as an RPM file attribute.
+.SH PACKAGING
+.nf
+BuildRequires:  sysjar
+BuildRequires:  mvn(org.slf4j:slf4j-api)
+
+%build
+%sysjar_mvn -DskipTests package
+
+%install
+%sysjar_install
+.fi
+.PP
+The same steps are available as declarative build systems. Installing
+this package provides
+.BR rpm-build(maven) ,
+.BR rpm-build(gradle) ,
+.BR rpm-build(ant)
+and
+.BR rpm-build(ivy) ,
+which is what
+.B BuildSystem:
+requires. A spec can be:
+.PP
+.nf
+BuildSystem: maven
+BuildOption: -DskipTests
+.fi
+.PP
+.B %build
+runs
+.B sysjar mvn -Dmaven.test.skip=true package
+plus the
+.B BuildOption
+and
+.B BuildOption(build)
+words. A word that does not start with a dash is a goal and replaces
+.BR package ,
+so
+.B BuildOption(build): compile
+does not also run
+.BR package .
+.B %install
+runs
+.BR "sysjar install --auto" .
+.B BuildOption(install): --file-name demo
+is passed through.
+.B BuildOption(install): --artifact pom:jar
+installs that pair instead of discovering one.
+.B BuildSystem: gradle
+defaults to
+.BR assemble .
+.B BuildSystem: ant
+runs Ant's default target, and
+.B BuildSystem: ivy
+is that same Ant build. The static build requirement is the launcher
+package
+.RB ( maven ,
+.B gradle
+or
+.BR ant ).
+.B %check
+runs
+.B test
+when the spec defines
+.BR "%bcond_without tests" .
+.B %generate_buildrequires
+prints
+.B mvn()
+lines for the unpacked tree, including libraries that are not installed yet.
+A package that is itself the bootstrap, such as Maven, sets
+.B %global sysjar_bootstrap 1
+and
+.B %global _sysjar_mvn
+to the stage-0 launcher. The static build requirement is then
+.B javapackages-bootstrap
+instead of
+.BR maven ,
+and sysjar is passed
+.BR --bootstrap .
+.B %global sysjar_bootstrap_root
+points at an extracted tree.
+.B %global sysjar_drops
+is passed through, usually as repeated
+.B --drop
+coordinates.
+.B %global sysjar_extra
+is passed through in front of those drops. A second index root goes here.
+.B --root
+replaces the default
+.IR / ,
+so keep the system index by repeating it:
+.B --root / --root /tmp/resolver-root .
+Leave
+.B sysjar_extra
+unset in the spec when a command-line
+.B \-\-define
+should supply the root. A spec
+.B %global
+of the same name would hide that define.
+.B %global _sysjar_java_version
+pins one JDK for a maven, gradle, ant or ivy build.
+Unset, the build uses the latest:
+.B java-current-devel
+at build time,
+.B %{_sysjar_java_requires}
+is
+.BR java-current ,
+and the section keeps
+.BR $JAVA_HOME .
+.B %global _sysjar_java_version 21
+selects
+.B java-21-openjdk-devel
+and
+.BR java-21-openjdk ,
+and exports
+.B JAVA_HOME
+as
+.IR %{_jvmdir}/java-21-openjdk .
+Use that only when a tool cannot read the current class-file major.
+.B %global _sysjar_java_home
+overrides the path and does not change those package names.
+.PP
+The installed record provides
+.B mvn(groupId:artifactId)
+at the project version, which is the name existing cooker packages
+already require. Classifiers use the same shape as those packages,
+for example
+.BR mvn(commons-logging:commons-logging::api:) .
+Requires are generated for direct compile and runtime dependencies.
+Optional, test, provided and system-scoped dependencies are not
+required at install time.
+.SH OPTIONS
+.TP
+.BI --root " DIR"
+Read the index from
+.I DIR
+instead of
+.IR / .
+Repeat to overlay one root on another. A
+.I .sysjar
+record wins over an XMvn fragment. At the same priority the later,
+or the higher, version wins.
+.TP
+.BI --bootstrap-root " DIR"
+Also read
+.I DIR/usr/share/javapackages-bootstrap/maven-metadata
+as a fallback. Those coordinates lose to any real package. Use this to
+compile a package before its dependencies are packaged on their own.
+.B --bootstrap
+reads that metadata from each
+.BR --root .
+A bootstrap coordinate can have more than one version. The build keeps
+the one it asked for. A dependency that leaves the version to a parent
+keeps doing that, so the managed version is the one that is matched. A
+real package replaces every bootstrap version.
+.TP
+.B -q
+Suppress the rewrite log and warnings. Errors are still printed.
+.SH FILES
+.TP
+.I /usr/share/java
+Shared jars.
+.TP
+.I /usr/share/maven-poms
+Upstream POMs. sysjar rewrites a copy when it builds a repository. It
+does not edit the installed POM.
+.TP
+.I /usr/share/sysjar/index
+One JSON record per artifact.
+.TP
+.I /usr/share/maven-metadata
+Legacy XMvn fragments. Still read.
+.TP
+.I /var/cache/sysjar/m2
+Maven repository rebuilt by a file trigger when the index changes.
+.SH "SEE ALSO"
+.BR build-classpath (1)
+.SH CAVEATS
+Gradle coordinates written only in a version catalog alias, or computed
+in a plugin, are not visible to
+.B scan
+until Gradle has resolved them. A multi-module Maven build resolves its
+own modules itself.
+.B sysjar
+does not replace those modules with whatever older jar happens to be
+installed.
+.PP
+Parent POMs have to be installed too. Maven will not build an effective
+model without them. A POM file that is not XML is replaced, in the
+repository only, by one generated from the index dependency list. The
+installed file is left alone. A jar that contains
+.I META-INF/maven/plugin.xml
+is published as a Maven plugin. Dependencies that the installed
+.B maven-core
+jar exports
+.RI ( Meta-INF/maven/extension.xml )
+are omitted from every generated POM except
+.BR maven-core 's
+own. Those jars are already on Maven's runtime classpath.
