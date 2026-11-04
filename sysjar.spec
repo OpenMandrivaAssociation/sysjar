@@ -5,6 +5,7 @@ Summary:	Build Maven and Gradle projects against system jars
 Group:		Development/Java
 License:	MIT
 URL:		https://openmandriva.org/
+Source0:	sysjar-%{version}.tar.gz
 BuildArch:	noarch
 
 BuildRequires:	python
@@ -27,11 +28,7 @@ in this package through rpm-build(maven) (and the matching names for
 the others) and fills in the build, install and check sections.
 
 %prep
-%setup -c -T
-# %check runs the buildsystem tests, which read macros.sysjar and bin/sysjar
-# next to the tests directory.
-cp -a %{_sourcedir}/sysjar %{_sourcedir}/tests %{_sourcedir}/bin \
-	%{_sourcedir}/macros.sysjar %{_sourcedir}/LICENSE .
+%setup -q
 
 %build
 
@@ -45,12 +42,12 @@ install -d %{buildroot}%{_datadir}/sysjar/index
 install -d %{buildroot}%{_mandir}/man1
 install -d %{buildroot}%{_rpmmacrodir}
 install -d %{buildroot}%{_rpmconfigdir}/fileattrs
-install -m0755 %{_sourcedir}/bin/sysjar %{buildroot}%{_bindir}/sysjar
-install -m0644 %{_sourcedir}/sysjar/*.py %{buildroot}%{_datadir}/sysjar/lib/sysjar/
-install -m0644 %{_sourcedir}/macros.sysjar %{buildroot}%{_rpmmacrodir}/macros.sysjar
-install -m0644 %{_sourcedir}/sysjar.attr %{buildroot}%{_rpmconfigdir}/fileattrs/sysjar.attr
-install -m0755 %{_sourcedir}/sysjardeps %{buildroot}%{_rpmconfigdir}/sysjardeps
-install -m0644 %{_sourcedir}/sysjar.1 %{buildroot}%{_mandir}/man1/sysjar.1
+install -m0755 bin/sysjar %{buildroot}%{_bindir}/sysjar
+install -m0644 sysjar/*.py %{buildroot}%{_datadir}/sysjar/lib/sysjar/
+install -m0644 macros.sysjar %{buildroot}%{_rpmmacrodir}/macros.sysjar
+install -m0644 sysjar.attr %{buildroot}%{_rpmconfigdir}/fileattrs/sysjar.attr
+install -m0755 sysjardeps %{buildroot}%{_rpmconfigdir}/sysjardeps
+install -m0644 sysjar.1 %{buildroot}%{_mandir}/man1/sysjar.1
 
 %transfiletriggerin -- %{_datadir}/sysjar/index
 /usr/bin/sysjar repo --dest /var/cache/sysjar/m2 -q || :
