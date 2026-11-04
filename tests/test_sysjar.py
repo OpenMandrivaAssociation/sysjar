@@ -876,6 +876,90 @@ class PomTests(unittest.TestCase):
         self.assertEqual(text_of(by_name["plexus-utils"], "version"), "")
         self.assertEqual(text_of(by_name["slf4j-api"], "version"), "2.0.17")
 
+    def test_child_keeps_a_plugin_managed_by_its_parent(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        project = root / "proj"
+        module = project / "maven-model"
+        module.mkdir(parents=True)
+        write_xml(ET.ElementTree(pom("""
+  <groupId>org.apache.maven</groupId>
+  <artifactId>maven</artifactId>
+  <version>3.10.0</version>
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.codehaus.modello</groupId>
+          <artifactId>modello-maven-plugin</artifactId>
+          <version>2.8.1</version>
+          <executions>
+            <execution>
+              <id>modello</id>
+              <goals><goal>java</goal></goals>
+            </execution>
+          </executions>
+        </plugin>
+        <plugin>
+          <artifactId>maven-site-plugin</artifactId>
+          <version>3.12.1</version>
+          <executions>
+            <execution>
+              <goals><goal>site</goal></goals>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+  <modules>
+    <module>maven-model</module>
+  </modules>
+""")), project / "pom.xml")
+        write_xml(ET.ElementTree(pom("""
+  <parent>
+    <groupId>org.apache.maven</groupId>
+    <artifactId>maven</artifactId>
+    <version>3.10.0</version>
+  </parent>
+  <artifactId>maven-model</artifactId>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.modello</groupId>
+        <artifactId>modello-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>modello</id>
+            <goals><goal>java</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-site-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+""")), module / "pom.xml")
+        index = Index()
+        index.add(artifact("org.codehaus.modello", "modello-maven-plugin", "2.4.0.MBI", "/modello.jar", priority=0))
+        from sysjar.pom import rewrite_tree
+        report = rewrite_tree(project, index, reactor_only=True)
+        self.assertFalse(report.blocking)
+        parent_plugins = [
+            text_of(item, "artifactId")
+            for item in children(child(child(child(parse_xml(project / "pom.xml").getroot(), "build"), "pluginManagement"), "plugins"), "plugin")
+        ]
+        self.assertEqual(parent_plugins, ["modello-maven-plugin"])
+        parent_plugin = child(child(child(child(parse_xml(project / "pom.xml").getroot(), "build"), "pluginManagement"), "plugins"), "plugin")
+        self.assertEqual(text_of(parent_plugin, "version"), "2.4.0.MBI")
+        child_plugins = [
+            text_of(item, "artifactId")
+            for item in children(child(child(parse_xml(module / "pom.xml").getroot(), "build"), "plugins"), "plugin")
+        ]
+        self.assertEqual(child_plugins, ["modello-maven-plugin"])
+        self.assertTrue(any("maven-site-plugin" in line for line in report.dropped))
+
     def _felix_parent(self, profile_version: str):
         return pom(f"""
   <groupId>org.apache.commons</groupId>

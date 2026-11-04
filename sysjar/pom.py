@@ -700,13 +700,21 @@ def _drop_uninstalled_test_dependency(hit: _Hit, root: ET.Element, index: Index,
 
 
 def _drop_uninstalled_managed_plugin(hit: _Hit, root: ET.Element, index: Index, strip_uninstalled: bool) -> bool:
-    """A versionless build plugin whose managed version is not installed."""
+    """A versionless build plugin whose managed version is not installed.
+
+    A version that this POM does not declare comes from a reactor parent.
+    That parent is rewritten first, so the use stays and Maven inherits the
+    installed version. Dropping it skips code generation.
+    """
     if not strip_uninstalled or hit.kind not in {"plugin", "extension"}:
         return False
     if "pluginManagement" in hit.ancestors or (hit.group, hit.artifact) in _KEEP_MISSING_PLUGINS:
         return False
+    versions = _managed_plugin_versions(root, hit.group, hit.artifact)
+    if not versions:
+        return False
     props = pom_properties(root)
-    for raw in _managed_plugin_versions(root, hit.group, hit.artifact):
+    for raw in versions:
         requested = expand(raw, props) if raw else ""
         if not requested or "${" in requested or requested[0] in "[(":
             continue
