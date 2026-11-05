@@ -31,8 +31,12 @@ _COMPILER_PROPS = {
 }
 _COMPILER_KEYS = ("source", "target", "release", "testSource", "testTarget")
 # Missing copies of these stay in the POM. Dropping them would publish a jar
-# that silently skipped code generation. Anything else Maven would try to
-# resolve (site, javadoc, enforcer, an SCM extension) is removed instead.
+# that silently skipped code generation or packaging. The bundle plugin, bnd
+# and build-helper are not here: an uninstalled copy is removed, and the jar
+# is still packed by the lifecycle. A missing generated source then fails at
+# compilation instead of while Maven is resolving the plugin. Anything else
+# Maven would try to resolve (site, javadoc, enforcer, an SCM extension) is
+# removed instead.
 _KEEP_MISSING_PLUGINS = {
     ("org.apache.maven.plugins", "maven-compiler-plugin"),
     ("org.apache.maven.plugins", "maven-resources-plugin"),
@@ -45,9 +49,6 @@ _KEEP_MISSING_PLUGINS = {
     ("org.apache.maven.plugins", "maven-dependency-plugin"),
     ("org.apache.maven.plugins", "maven-antrun-plugin"),
     ("org.apache.maven.plugins", "maven-plugin-plugin"),
-    ("org.apache.felix", "maven-bundle-plugin"),
-    ("biz.aQute.bnd", "bnd-maven-plugin"),
-    ("org.codehaus.mojo", "build-helper-maven-plugin"),
     ("org.moditect", "moditect-maven-plugin"),
 }
 # tools.jar ceased to be an artifact on JDK 9. The classes are in the JDK.
@@ -108,6 +109,8 @@ class _Hit:
     prop: str
     blocking: bool
     ancestors: tuple[str, ...]
+    owner_group: str = ""
+    owner_artifact: str = ""
 
 
 def pom_properties(root: ET.Element) -> dict[str, str]:
@@ -195,16 +198,21 @@ def _profile_default(ancestors: tuple[ET.Element, ...]) -> bool:
 def collect_hits(root: ET.Element) -> list[_Hit]:
     hits: list[_Hit] = []
 
-    def walk(elem: ET.Element, ancestors: tuple[ET.Element, ...]) -> None:
+    def walk(
+        elem: ET.Element,
+        ancestors: tuple[ET.Element, ...],
+        owner: tuple[str, str] | None = None,
+    ) -> None:
         name = local_name(elem.tag)
         if name in SKIP_SUBTREES:
             return
+        next_owner = owner
         if name in VERSIONED and ancestors:
             props = pom_properties(root)
             group = expand(text_of(elem, "groupId"), props)
             artifact = expand(text_of(elem, "artifactId"), props)
             # Plugins may omit groupId. Maven's default is org.apache.maven.plugins.
-            if name == "plugin" and artifact and not group:
+            if name in {"plugin", "extension"} and artifact and not group:
                 group = "org.apache.maven.plugins"
             version_raw = text_of(elem, "version")
             classifier = expand(text_of(elem, "classifier"), props)
@@ -225,9 +233,12 @@ def collect_hits(root: ET.Element) -> list[_Hit]:
                 hits.append(_Hit(
                     elem, name, group, artifact, version_raw, classifier, extension,
                     scope, optional, prop, blocking, names,
+                    owner[0] if owner else "", owner[1] if owner else "",
                 ))
+                if name in {"plugin", "extension"}:
+                    next_owner = (group, artifact)
         for item in list(elem):
-            walk(item, ancestors + (elem,))
+            walk(item, ancestors + (elem,), next_owner)
 
     walk(root, ())
     return hits
@@ -474,7 +485,8 @@ def rewrite_element(
     """
     reactor = reactor or set()
     drop = drop or set()
-    covered = set(managed or ()) | _declared_management(root)
+    declared = _declared_management(root)
+    covered = set(managed or ()) | declared
     report = Report()
     hits = collect_hits(root)
     props_elem = child(root, "properties")
@@ -501,9 +513,11 @@ def rewrite_element(
             continue
         if not hit.version_raw and (hit.kind, hit.group, hit.artifact) in covered:
             # pluginManagement supplies the version. Maven still resolves a
-            # plugin that sits in build/plugins, so an uninstalled managed
-            # version fails the build. Drop that use. The managed entry stays.
-            if _drop_uninstalled_managed_plugin(hit, root, index, strip_uninstalled):
+            # plugin that sits in build/plugins or an active profile, so an
+            # uninstalled managed version fails the build. Drop that use. A
+            # managed entry that only pins a version stays. One that this pass
+            # already removed took its version with it, so the use goes too.
+            if _drop_uninstalled_managed_plugin(hit, root, index, strip_uninstalled, declared):
                 _mark_removed(hit.elem, removed)
                 remove_node(root, hit.elem)
                 report.dropped.append(f"{source}: dropped {hit.kind} {label} (not installed)")
@@ -648,13 +662,19 @@ def rewrite_element(
 
 def _managed_plugin_versions(root: ET.Element, group: str, artifact: str) -> list[str]:
     versions: list[str] = []
+    props = pom_properties(root)
 
     def walk(elem: ET.Element, ancestors: tuple[str, ...]) -> None:
         name = local_name(elem.tag)
         if name == "plugin" and "pluginManagement" in ancestors:
-            plugin_group = text_of(elem, "groupId") or "org.apache.maven.plugins"
-            plugin_artifact = text_of(elem, "artifactId")
-            if plugin_group == group and plugin_artifact == artifact:
+            plugin_group = expand(text_of(elem, "groupId"), props) or "org.apache.maven.plugins"
+            plugin_artifact = expand(text_of(elem, "artifactId"), props)
+            if (
+                plugin_group == group
+                and plugin_artifact == artifact
+                and "${" not in plugin_group
+                and "${" not in plugin_artifact
+            ):
                 versions.append(text_of(elem, "version"))
         for item in list(elem):
             walk(item, ancestors + (name,))
@@ -699,12 +719,20 @@ def _drop_uninstalled_test_dependency(hit: _Hit, root: ET.Element, index: Index,
     return index.find(hit.group, hit.artifact, hit.classifier, hit.extension or "jar") is None
 
 
-def _drop_uninstalled_managed_plugin(hit: _Hit, root: ET.Element, index: Index, strip_uninstalled: bool) -> bool:
+def _drop_uninstalled_managed_plugin(
+    hit: _Hit,
+    root: ET.Element,
+    index: Index,
+    strip_uninstalled: bool,
+    declared: set[tuple[str, str, str]],
+) -> bool:
     """A versionless build plugin whose managed version is not installed.
 
     A version that this POM does not declare comes from a reactor parent.
     That parent is rewritten first, so the use stays and Maven inherits the
-    installed version. Dropping it skips code generation.
+    installed version. Dropping it skips code generation. A plugin this POM
+    did declare is different: an entry with executions is removed earlier in
+    this pass, and the use then has no version left.
     """
     if not strip_uninstalled or hit.kind not in {"plugin", "extension"}:
         return False
@@ -712,7 +740,7 @@ def _drop_uninstalled_managed_plugin(hit: _Hit, root: ET.Element, index: Index, 
         return False
     versions = _managed_plugin_versions(root, hit.group, hit.artifact)
     if not versions:
-        return False
+        return (hit.kind, hit.group, hit.artifact) in declared
     props = pom_properties(root)
     for raw in versions:
         requested = expand(raw, props) if raw else ""

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from sysjar.ivy import ivy_scope
 from sysjar.model import Index
-from sysjar.pom import collect_hits, discover_reactor, expand, pom_properties
+from sysjar.pom import _KEEP_MISSING_PLUGINS, collect_hits, discover_reactor, expand, pom_properties
 from sysjar.rpmmeta import capability
 from sysjar.xmlutil import local_name, parse_xml
 import xml.etree.ElementTree as ET
@@ -49,6 +49,11 @@ class Finding:
     classifier: str = ""
     extension: str = "jar"
     heuristic: bool = False
+    # Set when this dependency is declared inside a plugin or an extension.
+    # The plugin coordinate is what decides whether the dependency survives
+    # the rewrite. An empty owner is a dependency of the project itself.
+    owner_group: str = ""
+    owner_artifact: str = ""
 
     @property
     def label(self) -> str:
@@ -141,6 +146,8 @@ def _scan_pom(path: Path, index: Index) -> list[Finding]:
             optional=hit.optional,
             classifier=hit.classifier,
             extension=hit.extension or "jar",
+            owner_group=hit.owner_group,
+            owner_artifact=hit.owner_artifact,
         ))
     return findings
 
@@ -209,13 +216,35 @@ def _dedup(findings: list[Finding]) -> list[Finding]:
     return out
 
 
+def _missing_build_dependency(finding: Finding) -> bool:
+    """A jar mock should install before %build.
+
+    Parents and plugins are omitted. The rewrite drops a plugin the system
+    does not have, and a parent POM is already satisfied by the index. A
+    dependency nested in such a plugin goes away with it. A dependency of a
+    plugin that stays (the compiler, the jar plugin, and the rest of the
+    keep list) is still resolved, so that jar has to be installed.
+    """
+    if finding.kind != "dependency":
+        return False
+    if finding.scope not in {"compile", "runtime", ""}:
+        return False
+    if finding.owner_artifact and (finding.owner_group, finding.owner_artifact) not in _KEEP_MISSING_PLUGINS:
+        return False
+    return True
+
+
 def build_requires(findings: list[Finding], *, allow_missing: bool = False) -> list[str]:
     """Dependency names for %generate_buildrequires.
 
     One bare name per line. rpm records a ``BuildRequires:`` prefix as its
     own dependency, and mock then looks for a package of that name.
-    Missing dependencies are omitted when allow_missing is set, because mock
-    installs every name this prints and an unpackaged plugin fails the build.
+
+    With allow_missing, a coordinate the index already resolved is left out.
+    The file is already in the buildroot, and requesting the capability can
+    pull a second provider that does not install. Missing parents and plugins
+    are left out too. A missing compile or runtime dependency is printed, so
+    mock installs that jar before %build.
     """
     lines = []
     seen = set()
@@ -224,8 +253,9 @@ def build_requires(findings: list[Finding], *, allow_missing: bool = False) -> l
             continue
         if finding.scope in {"provided", "system"}:
             continue
-        if allow_missing and finding.missing:
-            continue
+        if allow_missing:
+            if not finding.missing or not _missing_build_dependency(finding):
+                continue
         cap = finding.capability()
         if not cap or cap in seen:
             continue

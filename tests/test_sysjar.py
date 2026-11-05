@@ -345,6 +345,79 @@ class IndexTests(unittest.TestCase):
         loose_labels = {item.label for item in scan(loose, Index())}
         self.assertIn("com.acme:also-missing", loose_labels)
 
+    def test_allow_missing_asks_only_for_deps_the_build_still_needs(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        project = root / "proj"
+        project.mkdir()
+        write_xml(ET.ElementTree(pom("""
+  <parent>
+    <groupId>org.apache</groupId>
+    <artifactId>apache</artifactId>
+    <version>35</version>
+  </parent>
+  <groupId>com.example</groupId>
+  <artifactId>demo</artifactId>
+  <version>1</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>2.0.17</version>
+    </dependency>
+    <dependency>
+      <groupId>com.google.guava</groupId>
+      <artifactId>guava</artifactId>
+      <version>33</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+        <dependencies>
+          <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm</artifactId>
+            <version>9.10.1</version>
+          </dependency>
+        </dependencies>
+      </plugin>
+      <plugin>
+        <artifactId>maven-checkstyle-plugin</artifactId>
+        <version>3.6.0</version>
+        <dependencies>
+          <dependency>
+            <groupId>com.puppycrawl.tools</groupId>
+            <artifactId>checkstyle</artifactId>
+            <version>10</version>
+          </dependency>
+        </dependencies>
+      </plugin>
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <version>3.8.0</version>
+      </plugin>
+    </plugins>
+  </build>
+""")), project / "pom.xml")
+        index = Index()
+        index.add(artifact("org.apache", "apache", "35", "/apache.pom", extension="pom"))
+        index.add(artifact("com.google.guava", "guava", "33.4.0", "/guava.jar"))
+        findings = scan(project, index)
+        requested = set(build_requires(findings, allow_missing=True))
+        self.assertIn("mvn(org.slf4j:slf4j-api)", requested)
+        self.assertIn("mvn(org.ow2.asm:asm)", requested)
+        self.assertNotIn("mvn(org.apache:apache)", requested)
+        self.assertNotIn("mvn(com.google.guava:guava)", requested)
+        self.assertNotIn("mvn(com.diffplug.spotless:spotless-maven-plugin)", requested)
+        self.assertNotIn("mvn(com.puppycrawl.tools:checkstyle)", requested)
+        full = set(build_requires(findings))
+        self.assertIn("mvn(org.apache:apache)", full)
+        self.assertIn("mvn(com.google.guava:guava)", full)
+
 
 class PomTests(unittest.TestCase):
     def index(self):
@@ -1557,6 +1630,7 @@ class RepoTests(unittest.TestCase):
 """)), pom_path)
         index = Index()
         index.add(artifact("org.apache.commons", "commons-parent", "89", str(pom_path), extension="pom"))
+        index.add(artifact("org.apache.felix", "maven-bundle-plugin", "5.1.9", "/bundle.jar"))
         kept = root / "m2-kept"
         materialize(index, kept)
         kept_text = (kept / "org/apache/commons/commons-parent/89/commons-parent-89.pom").read_text(encoding="utf-8")
@@ -1567,6 +1641,154 @@ class RepoTests(unittest.TestCase):
         dropped_text = (dropped / "org/apache/commons/commons-parent/89/commons-parent-89.pom").read_text(encoding="utf-8")
         self.assertNotIn("moditect-maven-plugin", dropped_text)
         self.assertIn("maven-bundle-plugin", dropped_text)
+
+    def test_versionless_use_is_removed_when_its_managed_plugin_is(self):
+        root = pom("""
+  <groupId>org.apache.commons</groupId>
+  <artifactId>commons-parent</artifactId>
+  <version>107</version>
+  <properties>
+    <commons.cyclonedx.version>2.9.3</commons.cyclonedx.version>
+  </properties>
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.cyclonedx</groupId>
+          <artifactId>cyclonedx-maven-plugin</artifactId>
+          <version>${commons.cyclonedx.version}</version>
+          <executions>
+            <execution>
+              <goals><goal>makeAggregateBom</goal></goals>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+    <plugins>
+      <plugin>
+        <groupId>org.cyclonedx</groupId>
+        <artifactId>cyclonedx-maven-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+      </plugin>
+    </plugins>
+  </build>
+""")
+        report = rewrite_element(root, Index(), strip_uninstalled=True)
+        plugins = [
+            text_of(item, "artifactId")
+            for item in children(child(child(root, "build"), "plugins"), "plugin")
+        ]
+        managed = [
+            text_of(item, "artifactId")
+            for item in children(child(child(child(root, "build"), "pluginManagement"), "plugins"), "plugin")
+        ]
+        self.assertEqual(plugins, ["maven-compiler-plugin"])
+        self.assertEqual(managed, [])
+        self.assertTrue(any("cyclonedx-maven-plugin" in line for line in report.dropped))
+        self.assertFalse(report.blocking)
+
+    def test_versionless_profile_plugin_is_removed_with_its_managed_entry(self):
+        root = pom("""
+  <groupId>org.codehaus.mojo</groupId>
+  <artifactId>mojo-parent</artifactId>
+  <version>97</version>
+  <properties>
+    <spotless-maven-plugin.version>3.8.0</spotless-maven-plugin.version>
+  </properties>
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>com.diffplug.spotless</groupId>
+          <artifactId>spotless-maven-plugin</artifactId>
+          <version>${spotless-maven-plugin.version}</version>
+          <executions>
+            <execution>
+              <goals><goal>check</goal></goals>
+            </execution>
+          </executions>
+        </plugin>
+        <plugin>
+          <artifactId>maven-assembly-plugin</artifactId>
+          <version>3.7.1</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+  <profiles>
+    <profile>
+      <id>java17+</id>
+      <activation><jdk>[17,)</jdk></activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.diffplug.spotless</groupId>
+            <artifactId>spotless-maven-plugin</artifactId>
+          </plugin>
+          <plugin>
+            <artifactId>maven-assembly-plugin</artifactId>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+""")
+        rewrite_element(root, Index(), strip_uninstalled=True)
+        profile = child(child(root, "profiles"), "profile")
+        plugins = [
+            text_of(item, "artifactId")
+            for item in children(child(child(profile, "build"), "plugins"), "plugin")
+        ]
+        managed = [
+            text_of(item, "artifactId")
+            for item in children(child(child(child(root, "build"), "pluginManagement"), "plugins"), "plugin")
+        ]
+        self.assertEqual(plugins, ["maven-assembly-plugin"])
+        self.assertEqual(managed, ["maven-assembly-plugin"])
+        self.assertNotIn("com.diffplug.spotless", ET.tostring(root, encoding="unicode"))
+
+    def test_uninstalled_bundle_and_build_helper_are_removed(self):
+        root = pom("""
+  <groupId>org.joda</groupId>
+  <artifactId>joda-convert</artifactId>
+  <version>3.0.1</version>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.felix</groupId>
+        <artifactId>maven-bundle-plugin</artifactId>
+        <version>5.1.9</version>
+        <executions>
+          <execution>
+            <goals><goal>manifest</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.6.2</version>
+      </plugin>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+      </plugin>
+    </plugins>
+  </build>
+""")
+        report = rewrite_element(root, Index(), strip_uninstalled=True)
+        plugins = [
+            text_of(item, "artifactId")
+            for item in children(child(child(root, "build"), "plugins"), "plugin")
+        ]
+        self.assertEqual(plugins, ["maven-compiler-plugin"])
+        self.assertTrue(any("maven-bundle-plugin" in line for line in report.dropped))
+        self.assertTrue(any("build-helper-maven-plugin" in line for line in report.dropped))
+        self.assertFalse(report.blocking)
 
     def test_published_pom_raises_compiler_level_and_keeps_plugins(self):
         root = Path(tempfile.mkdtemp())
@@ -1974,14 +2196,15 @@ class CliTests(unittest.TestCase):
         status, out, err = self.invoke(["builddep", "--allow-missing", "--root", str(root), str(project)])
         self.assertEqual(status, 0, err)
         self.assertNotIn("junit:junit", out)
-        self.assertIn("mvn(org.slf4j:slf4j-api)\n", out)
+        # Already in the index. Requesting it would make mock install another provider.
+        self.assertNotIn("slf4j-api", out)
         self.assertIn("missing mvn(junit:junit)", err)
         status, out, err = self.invoke([
             "builddep", "--allow-missing", "--drop", "junit:junit", "--root", str(root), str(project),
         ])
         self.assertEqual(status, 0, err)
         self.assertNotIn("junit:junit", out)
-        self.assertIn("mvn(org.slf4j:slf4j-api)\n", out)
+        self.assertNotIn("slf4j-api", out)
 
         status, out, err = self.invoke([
             "mvn", "--root", str(root), "--project", str(project), "--print", "--", "-DskipTests", "package",
