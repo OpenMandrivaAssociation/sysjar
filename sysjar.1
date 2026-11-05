@@ -208,12 +208,14 @@ Show each dependency and whether a system jar provides it. Gradle
 files are scanned as text, so those lines are marked heuristic.
 .TP
 .B builddep PATH
-Print
-.B BuildRequires
-lines. Exits 1 when something is not installed. The lines are still
-printed, so they can be pasted into a spec.
+Print one dependency name per line, for
+.BR %generate_buildrequires .
+A
+.B BuildRequires:
+prefix is not printed: rpm would record that word as its own dependency.
+Exits 1 when something is not installed, and still prints that name.
 .B --allow-missing
-exits 0 after printing them.
+omits names that are not installed and exits 0.
 .TP
 .B check
 Report index entries whose jar or POM is not on disk.

@@ -209,8 +209,14 @@ def _dedup(findings: list[Finding]) -> list[Finding]:
     return out
 
 
-def build_requires(findings: list[Finding]) -> list[str]:
-    """Runtime, compile, test, import and plugin requirements. Optional deps are omitted."""
+def build_requires(findings: list[Finding], *, allow_missing: bool = False) -> list[str]:
+    """Dependency names for %generate_buildrequires.
+
+    One bare name per line. rpm records a ``BuildRequires:`` prefix as its
+    own dependency, and mock then looks for a package of that name.
+    Missing dependencies are omitted when allow_missing is set, because mock
+    installs every name this prints and an unpackaged plugin fails the build.
+    """
     lines = []
     seen = set()
     for finding in findings:
@@ -218,9 +224,11 @@ def build_requires(findings: list[Finding]) -> list[str]:
             continue
         if finding.scope in {"provided", "system"}:
             continue
+        if allow_missing and finding.missing:
+            continue
         cap = finding.capability()
-        if cap in seen:
+        if not cap or cap in seen:
             continue
         seen.add(cap)
-        lines.append(f"BuildRequires:\t{cap}")
+        lines.append(cap)
     return lines

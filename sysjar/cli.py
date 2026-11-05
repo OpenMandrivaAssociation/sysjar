@@ -97,9 +97,9 @@ def main(argv: list[str] | None = None) -> int:
 
     scan_cmd = with_index(sub.add_parser("scan", help="show which dependencies are system jars"))
     scan_cmd.add_argument("path", type=Path, nargs="?", default=Path("."))
-    builddep = with_index(sub.add_parser("builddep", help="print BuildRequires lines for a project"))
+    builddep = with_index(sub.add_parser("builddep", help="print dependency names for a project"))
     builddep.add_argument("--allow-missing", action="store_true",
-                          help="exit 0 after printing requirements that are not installed yet")
+                          help="omit requirements that are not installed, and exit 0")
     builddep.add_argument("--drop", action="append", default=[], metavar="GROUP:ARTIFACT",
                           help="do not require this coordinate. Repeatable")
     builddep.add_argument("path", type=Path, nargs="?", default=Path("."))
@@ -214,7 +214,7 @@ def _run(args: argparse.Namespace) -> int:
                 item for item in findings
                 if item.label not in dropped and f"{item.label}:{item.classifier}" not in dropped
             ]
-        for line in build_requires(findings):
+        for line in build_requires(findings, allow_missing=args.allow_missing):
             print(line)
         missing = [item for item in findings if item.missing and not item.optional and item.scope not in {"provided", "system"}]
         for item in missing:

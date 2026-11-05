@@ -1594,18 +1594,21 @@ class CliTests(unittest.TestCase):
 
         status, out, err = self.invoke(["builddep", "--root", str(root), str(project)])
         self.assertEqual(status, 1)
-        self.assertIn("BuildRequires:\tmvn(org.slf4j:slf4j-api)", out)
-        self.assertIn("BuildRequires:\tmvn(junit:junit)", out)
+        self.assertIn("mvn(org.slf4j:slf4j-api)\n", out)
+        self.assertIn("mvn(junit:junit)\n", out)
+        self.assertNotIn("BuildRequires:", out)
         self.assertIn("missing mvn(junit:junit)", err)
         status, out, err = self.invoke(["builddep", "--allow-missing", "--root", str(root), str(project)])
         self.assertEqual(status, 0, err)
-        self.assertIn("BuildRequires:\tmvn(junit:junit)", out)
+        self.assertNotIn("junit:junit", out)
+        self.assertIn("mvn(org.slf4j:slf4j-api)\n", out)
+        self.assertIn("missing mvn(junit:junit)", err)
         status, out, err = self.invoke([
             "builddep", "--allow-missing", "--drop", "junit:junit", "--root", str(root), str(project),
         ])
         self.assertEqual(status, 0, err)
         self.assertNotIn("junit:junit", out)
-        self.assertIn("BuildRequires:\tmvn(org.slf4j:slf4j-api)", out)
+        self.assertIn("mvn(org.slf4j:slf4j-api)\n", out)
 
         status, out, err = self.invoke([
             "mvn", "--root", str(root), "--project", str(project), "--print", "--", "-DskipTests", "package",

@@ -1,6 +1,6 @@
 Name:		sysjar
 Version:	0.1.0
-Release:	3
+Release:	4
 Summary:	Build Maven and Gradle projects against system jars
 Group:		Development/Java
 License:	MIT
