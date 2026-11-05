@@ -989,6 +989,52 @@ def _build_plugin_ids(root: ET.Element) -> set[tuple[str, str]]:
     return found
 
 
+def drop_versionless_managed_plugins(
+    root: ET.Element,
+    index: Index,
+    *,
+    source: str = "",
+) -> Report:
+    """Remove a managed plugin that still has no concrete version.
+
+    Maven resolves the version of every pluginManagement entry. One that
+    names no version, or only a property that did not expand, asks the
+    repository for maven-metadata.xml and fails offline. A toolchain pin
+    runs first, so a plugin shipped there already has a version. An
+    installed jar keeps its configuration.
+    """
+    report = Report()
+    props = pom_properties(root)
+    doomed: list[tuple[ET.Element, str, str]] = []
+
+    def walk(elem: ET.Element, ancestors: tuple[str, ...]) -> None:
+        name = local_name(elem.tag)
+        if name == "plugin" and "pluginManagement" in ancestors:
+            group = expand(text_of(elem, "groupId"), props) or "org.apache.maven.plugins"
+            artifact = expand(text_of(elem, "artifactId"), props)
+            version = expand(text_of(elem, "version"), props)
+            concrete = bool(version) and "${" not in version and version[:1] not in {"[", "("}
+            if (
+                artifact
+                and "${" not in group
+                and "${" not in artifact
+                and not concrete
+                and index.find(group, artifact, "", "jar") is None
+            ):
+                doomed.append((elem, group, artifact))
+        for child_node in list(elem):
+            walk(child_node, ancestors + (name,))
+
+    walk(root, ())
+    for elem, group, artifact in doomed:
+        remove_node(root, elem)
+        report.dropped.append(f"{source}: dropped plugin {group}:{artifact} (no version)")
+        report.gaps.append(Gap(
+            source, f"{group}:{artifact}", "", "plugin", "compile", False, False,
+        ))
+    return report
+
+
 def rewrite_tree(
     root: Path,
     index: Index,
@@ -1031,6 +1077,11 @@ def rewrite_tree(
                 )
                 changed = changed or bool(pinned.changes)
                 report.extend(pinned)
+            dropped = drop_versionless_managed_plugins(
+                tree.getroot(), index, source=str(path),
+            )
+            changed = changed or bool(dropped.dropped)
+            report.extend(dropped)
             if changed:
                 write_xml(tree, path)
         except (OSError, ET.ParseError) as exc:

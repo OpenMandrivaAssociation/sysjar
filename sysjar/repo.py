@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 
 from sysjar.model import Artifact, Coord, Dependency, Index, JAR_LIKE
-from sysjar.pom import pin_toolchain_plugins, rewrite_path
+from sysjar.pom import drop_versionless_managed_plugins, pin_toolchain_plugins, rewrite_path
 from sysjar.xmlutil import local_name, parse_xml, upsert, write_xml
 import xml.etree.ElementTree as ET
 
@@ -300,8 +300,12 @@ def _write_pom(
 
 
 def _pin_copied_pom(dest: Path, index: Index, toolchain: dict[tuple[str, str], str] | None) -> None:
-    """Move plugin pins in a POM that Maven will inherit from the private repo."""
-    if not toolchain or not dest.is_file():
+    """Move plugin pins in a POM that Maven will inherit from the private repo.
+
+    A managed plugin that still has no version is removed. Maven would
+    look that version up from the network.
+    """
+    if not dest.is_file():
         return
     try:
         tree = parse_xml(dest)
@@ -310,8 +314,12 @@ def _pin_copied_pom(dest: Path, index: Index, toolchain: dict[tuple[str, str], s
     root = tree.getroot()
     if local_name(root.tag) != "project":
         return
-    pinned = pin_toolchain_plugins(root, index, toolchain, source=str(dest))
-    if pinned.changes:
+    changed = False
+    if toolchain:
+        pinned = pin_toolchain_plugins(root, index, toolchain, source=str(dest))
+        changed = bool(pinned.changes)
+    dropped = drop_versionless_managed_plugins(root, index, source=str(dest))
+    if changed or dropped.dropped:
         write_xml(tree, dest)
 
 

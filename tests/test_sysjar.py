@@ -1446,6 +1446,57 @@ class RepoTests(unittest.TestCase):
         self.assertNotIn(">2.6<", text)
         self.assertEqual(parent.read_text(encoding="utf-8").count(">2.6<"), 1)
 
+    def test_versionless_managed_plugin_is_removed_and_a_toolchain_pin_is_kept(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        tool = root / "tool"
+        base = tool / "org/apache/maven/plugins/maven-resources-plugin/3.3.1.MBI"
+        base.mkdir(parents=True)
+        (base / "maven-resources-plugin-3.3.1.MBI.pom").write_text(
+            "<project><packaging>maven-plugin</packaging></project>",
+            encoding="utf-8",
+        )
+        (base.parent / "maven-metadata.xml").write_text(
+            """<?xml version="1.0" encoding="utf-8"?>
+<metadata><groupId>org.apache.maven.plugins</groupId>
+<artifactId>maven-resources-plugin</artifactId>
+<versioning><latest>3.3.1.MBI</latest></versioning></metadata>
+""",
+            encoding="utf-8",
+        )
+        project = root / "proj"
+        project.mkdir()
+        (project / "pom.xml").write_text(
+            """<?xml version="1.0" encoding="utf-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId><artifactId>demo</artifactId><version>1</version>
+  <packaging>pom</packaging>
+  <build><pluginManagement><plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-release-plugin</artifactId>
+      <configuration><useReleaseProfile>false</useReleaseProfile></configuration>
+    </plugin>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-resources-plugin</artifactId>
+    </plugin>
+  </plugins></pluginManagement></build>
+</project>
+""",
+            encoding="utf-8",
+        )
+        from sysjar import build as buildmod
+        previous = buildmod.TOOLCHAIN_REPO
+        buildmod.TOOLCHAIN_REPO = tool
+        self.addCleanup(setattr, buildmod, "TOOLCHAIN_REPO", previous)
+        prepare_maven(project, Index(), project / ".sysjar" / "work")
+        text = (project / "pom.xml").read_text(encoding="utf-8")
+        self.assertNotIn("maven-release-plugin", text)
+        self.assertIn("maven-resources-plugin", text)
+        self.assertIn(">3.3.1.MBI<", text)
+
     def test_prepare_maven_overlays_the_toolchain(self):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)

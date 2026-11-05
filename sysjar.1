@@ -99,7 +99,9 @@ project being built, except a plugin that produces the main artifact
 (compiler, resources, jar, war, ear, assembly, shade, antrun, bundle,
 build-helper, moditect, and the plugin plugin). A pluginManagement
 entry that only pins a version stays, unless the toolchain has that
-plugin, in which case the pin is moved to the toolchain version. One that declares executions is
+plugin, in which case the pin is moved to the toolchain version. One
+that names no version is removed when the plugin is not installed,
+because Maven resolves that version before it runs the build. One that declares executions is
 removed when the plugin is not installed, because Maven resolves it
 while loading the project. A reporting plugin that is not installed is
 removed too. The removed plugin is reported. It does not run.
