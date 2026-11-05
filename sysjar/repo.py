@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import re
 import zipfile
 from pathlib import Path
 
@@ -72,6 +74,8 @@ def overlay_repo(source: Path, dest: Path) -> None:
 
     A missing source is not an error. The toolchain package may be older
     than sysjar, and a build then fails in Maven with the plugin name.
+    A plugin jar whose descriptor names a different artifact is copied
+    with that id corrected. Maven rejects the symlink as-is.
     """
     if not source.is_dir():
         return
@@ -86,7 +90,50 @@ def overlay_repo(source: Path, dest: Path) -> None:
         if target.exists() or target.is_symlink():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
+        if path.suffix == ".jar" and len(relative.parts) >= 3:
+            corrected = _corrected_plugin_jar(path.read_bytes(), relative.parts[-3])
+            if corrected is not None:
+                target.write_bytes(corrected)
+                for algo in ("sha1", "md5"):
+                    digest = hashlib.new(algo, corrected).hexdigest() + "\n"
+                    target.with_name(target.name + f".{algo}").write_text(digest, encoding="utf-8")
+                continue
+        if path.suffix in {".sha1", ".md5"} and target.exists() and not target.is_symlink():
+            continue
         target.symlink_to(path.resolve())
+
+
+def _corrected_plugin_jar(data: bytes, artifact: str) -> bytes | None:
+    """Return jar bytes whose plugin descriptor artifactId matches the coordinate.
+
+    The bootstrap maven-plugin-plugin jar describes itself as maven-plugin-tools,
+    the reactor parent. Maven then refuses the jar.
+    """
+    if not artifact:
+        return None
+    try:
+        src = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return None
+    name = "META-INF/maven/plugin.xml"
+    try:
+        if name not in src.namelist():
+            return None
+        xml = src.read(name).decode("utf-8")
+    except (OSError, UnicodeError, zipfile.BadZipFile):
+        return None
+    match = re.search(r"<artifactId>([^<]*)</artifactId>", xml)
+    if match is None or match.group(1).strip() == artifact:
+        src.close()
+        return None
+    xml = xml[: match.start(1)] + artifact + xml[match.end(1) :]
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as dst:
+        for info in src.infolist():
+            payload = xml.encode("utf-8") if info.filename == name else src.read(info.filename)
+            dst.writestr(info, payload)
+    src.close()
+    return out.getvalue()
 
 
 def materialize(

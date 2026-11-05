@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import os
@@ -1346,6 +1347,40 @@ class RepoTests(unittest.TestCase):
         self.assertEqual(link.resolve(), jar.resolve())
         self.assertEqual(kept.read_text(encoding="utf-8"), "kept")
         overlay_repo(root / "missing", dest)
+
+    def test_overlay_rewrites_a_plugin_descriptor_artifact_id(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        source = root / "tool"
+        version_dir = source / "org/apache/maven/plugins/maven-plugin-plugin/3.9.0.MBI"
+        version_dir.mkdir(parents=True)
+        jar = version_dir / "maven-plugin-plugin-3.9.0.MBI.jar"
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr(
+                "META-INF/maven/plugin.xml",
+                "<plugin><artifactId>maven-plugin-tools</artifactId></plugin>",
+            )
+            archive.writestr("Mojo.class", b"mojo")
+        jar.write_bytes(payload.getvalue())
+        (version_dir / "maven-plugin-plugin-3.9.0.MBI.jar.sha1").write_text("stale\n", encoding="utf-8")
+        plain = source / "org/example/demo/1.0/demo-1.0.jar"
+        plain.parent.mkdir(parents=True)
+        plain.write_bytes(b"plain")
+        dest = root / "repo"
+        overlay_repo(source, dest)
+        copied = dest / "org/apache/maven/plugins/maven-plugin-plugin/3.9.0.MBI/maven-plugin-plugin-3.9.0.MBI.jar"
+        self.assertFalse(copied.is_symlink())
+        with zipfile.ZipFile(copied) as archive:
+            text = archive.read("META-INF/maven/plugin.xml").decode("utf-8")
+            self.assertEqual(archive.read("Mojo.class"), b"mojo")
+        self.assertIn("<artifactId>maven-plugin-plugin</artifactId>", text)
+        digest = hashlib.sha1(copied.read_bytes()).hexdigest()
+        side = copied.with_name(copied.name + ".sha1")
+        self.assertFalse(side.is_symlink())
+        self.assertEqual(side.read_text(encoding="utf-8").strip(), digest)
+        link = dest / "org/example/demo/1.0/demo-1.0.jar"
+        self.assertTrue(link.is_symlink())
 
     def test_toolchain_plugin_pin_replaces_a_project_version_not_a_library(self):
         root = Path(tempfile.mkdtemp())
