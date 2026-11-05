@@ -1,6 +1,6 @@
 Name:		sysjar
 Version:	0.1.0
-Release:	5
+Release:	6
 Summary:	Build Maven and Gradle projects against system jars
 Group:		Development/Java
 License:	MIT
@@ -9,6 +9,7 @@ Source0:	sysjar-%{version}.tar.gz
 BuildArch:	noarch
 
 BuildRequires:	python
+BuildRequires:	javapackages-bootstrap
 Requires:	python
 Requires:	javapackages-filesystem
 
@@ -50,6 +51,9 @@ install -m0644 macros.sysjar %{buildroot}%{_rpmmacrodir}/macros.zzz-sysjar
 install -m0644 sysjar.attr %{buildroot}%{_rpmconfigdir}/fileattrs/sysjar.attr
 install -m0755 sysjardeps %{buildroot}%{_rpmconfigdir}/sysjardeps
 install -m0644 sysjar.1 %{buildroot}%{_mandir}/man1/sysjar.1
+# Normal Maven builds do not install javapackages-bootstrap. Keep the
+# pom-only parents, so a coordinate no package provides still resolves.
+PYTHONPATH=. python -c 'from pathlib import Path; from sysjar.index import export_parent_poms; n = export_parent_poms(Path("/usr/share/javapackages-bootstrap"), Path("%{buildroot}%{_datadir}/sysjar/parents")); assert n >= 1, n'
 
 %transfiletriggerin -- %{_datadir}/sysjar/index
 /usr/bin/sysjar repo --dest /var/cache/sysjar/m2 -q || :
@@ -61,6 +65,7 @@ install -m0644 sysjar.1 %{buildroot}%{_mandir}/man1/sysjar.1
 %dir %{_datadir}/sysjar/index
 %dir %{_datadir}/sysjar/lib
 %{_datadir}/sysjar/lib/sysjar
+%{_datadir}/sysjar/parents
 %{_rpmmacrodir}/macros.zzz-sysjar
 %{_rpmconfigdir}/fileattrs/sysjar.attr
 %{_rpmconfigdir}/sysjardeps

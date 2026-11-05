@@ -84,14 +84,22 @@ exists, files there are linked into the private repository wherever
 the index did not already publish a file. A later link does not replace
 an index file. Those jars are not indexed, so a project dependency is
 still missing when the distribution has not packaged it. Parent POMs
-from javapackages-bootstrap fill a coordinate that no package provides.
-Bootstrap jars are not loaded that way.
+that no package provides are read from
+.IR /usr/share/sysjar/parents ,
+the pom-only coordinates from javapackages-bootstrap. Bootstrap jars
+are not loaded.
+A plugin pin is moved to the toolchain's version when that plugin is
+not an installed package, because Maven resolves the pin before the
+version built into maven-core. A POM copied into the private
+repository gets the same pin, so a version inherited from a parent
+resolves to the toolchain jar.
 .PP
 A plugin or build extension that is not installed is removed from the
 project being built, except a plugin that produces the main artifact
 (compiler, resources, jar, war, ear, assembly, shade, antrun, bundle,
 build-helper, moditect, and the plugin plugin). A pluginManagement
-entry that only pins a version stays. One that declares executions is
+entry that only pins a version stays, unless the toolchain has that
+plugin, in which case the pin is moved to the toolchain version. One that declares executions is
 removed when the plugin is not installed, because Maven resolves it
 while loading the project. A reporting plugin that is not installed is
 removed too. The removed plugin is reported. It does not run.

@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 
 from sysjar.model import Artifact, Coord, Dependency, Index, JAR_LIKE
-from sysjar.pom import rewrite_path
+from sysjar.pom import pin_toolchain_plugins, rewrite_path
 from sysjar.xmlutil import local_name, parse_xml, upsert, write_xml
 import xml.etree.ElementTree as ET
 
@@ -20,6 +20,51 @@ def default_repo() -> Path:
 # above ignore the version a build asked for, so indexing these jars would
 # satisfy every request and hide a missing BuildRequires.
 TOOLCHAIN_REPO = Path("/usr/share/maven/toolchain")
+
+
+def toolchain_plugin_versions(root: Path | None = None) -> dict[tuple[str, str], str]:
+    """Versions of maven-plugin artifacts in the lifecycle toolchain.
+
+    A library in that tree is not listed. Indexing it would satisfy a
+    project dependency the distribution has not packaged.
+    """
+    root = TOOLCHAIN_REPO if root is None else root
+    if not root.is_dir():
+        return {}
+    found: dict[tuple[str, str], str] = {}
+    for meta in sorted(root.rglob("maven-metadata.xml")):
+        try:
+            tree = ET.parse(meta)
+        except (OSError, ET.ParseError):
+            continue
+        group, artifact, latest = "", "", ""
+        for node in list(tree.getroot()):
+            name = local_name(node.tag)
+            if name == "groupId":
+                group = (node.text or "").strip()
+            elif name == "artifactId":
+                artifact = (node.text or "").strip()
+            elif name == "versioning":
+                for child_node in list(node):
+                    if local_name(child_node.tag) == "latest":
+                        latest = (child_node.text or "").strip()
+        if not group or not artifact or not latest:
+            continue
+        pom_path = meta.parent / latest / f"{artifact}-{latest}.pom"
+        if not pom_path.is_file():
+            continue
+        try:
+            pom_tree = ET.parse(pom_path)
+        except (OSError, ET.ParseError):
+            continue
+        packaging = ""
+        for node in list(pom_tree.getroot()):
+            if local_name(node.tag) == "packaging":
+                packaging = (node.text or "").strip()
+                break
+        if packaging == "maven-plugin":
+            found[(group, artifact)] = latest
+    return found
 
 
 def overlay_repo(source: Path, dest: Path) -> None:
@@ -44,16 +89,28 @@ def overlay_repo(source: Path, dest: Path) -> None:
         target.symlink_to(path.resolve())
 
 
-def materialize(index: Index, dest: Path, *, drop: set[str] | None = None) -> list[str]:
+def materialize(
+    index: Index,
+    dest: Path,
+    *,
+    drop: set[str] | None = None,
+    toolchain: dict[tuple[str, str], str] | None = None,
+) -> list[str]:
     """Write a Maven repository at dest. Jars are symlinks. POMs are rewritten copies.
 
     drop removes those coordinates from the published POMs as well as from
     the project. A parent profile is how a plugin reaches a build that never
     names it, and --drop has to catch it there.
 
+    toolchain moves a plugin pin to that version when the plugin is not an
+    installed package. A parent POM is copied here, and Maven inherits the
+    pin from that copy.
+
     Returns warnings. Missing files are skipped so a stale index entry cannot
     plant a broken symlink that Maven treats as a successful download.
     """
+    if toolchain is None:
+        toolchain = toolchain_plugin_versions()
     dest.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
     versions: dict[tuple[str, str], set[str]] = {}
@@ -68,7 +125,7 @@ def materialize(index: Index, dest: Path, *, drop: set[str] | None = None) -> li
         versions.setdefault((art.coord.group, art.coord.artifact), set()).add(art.version)
         extension = art.coord.extension or "jar"
         if extension == "pom" or (art.pom and extension == "pom"):
-            _write_pom(art, directory, index, warnings, drop=drop)
+            _write_pom(art, directory, index, warnings, drop=drop, toolchain=toolchain)
             continue
         if extension in JAR_LIKE or extension == "jar":
             target = art.path
@@ -82,7 +139,7 @@ def materialize(index: Index, dest: Path, *, drop: set[str] | None = None) -> li
             # XMvn ships the POM and the jar as two artifacts. A generated POM
             # must not replace the real one, whichever artifact is written last.
             if pom_source:
-                _write_pom(art, directory, index, warnings, source=pom_source, drop=drop)
+                _write_pom(art, directory, index, warnings, source=pom_source, drop=drop, toolchain=toolchain)
             elif not art.coord.classifier and not (directory / _file_name(art, "pom")).exists():
                 _write_generated_pom(art, directory, index)
         else:
@@ -199,7 +256,15 @@ def _checksums(path: Path) -> None:
         path.with_name(path.name + "." + algo).write_text(digest + "\n", encoding="ascii")
 
 
-def _write_pom(art: Artifact, directory: Path, index: Index, warnings: list[str], source: str = "", drop: set[str] | None = None) -> None:
+def _write_pom(
+    art: Artifact,
+    directory: Path,
+    index: Index,
+    warnings: list[str],
+    source: str = "",
+    drop: set[str] | None = None,
+    toolchain: dict[tuple[str, str], str] | None = None,
+) -> None:
     if not source:
         source = art.pom or (art.path if (art.coord.extension or "") == "pom" else "")
     source_path = Path(source) if source else None
@@ -227,10 +292,27 @@ def _write_pom(art: Artifact, directory: Path, index: Index, warnings: list[str]
         warnings.append(f"could not rewrite {source}: {exc}; generating a POM from the index")
         _write_generated_pom(art, directory, index)
         return
+    _pin_copied_pom(dest, index, toolchain)
     _checksums(dest)
     parent_gap = _parent_warning(dest, index)
     if parent_gap:
         warnings.append(parent_gap)
+
+
+def _pin_copied_pom(dest: Path, index: Index, toolchain: dict[tuple[str, str], str] | None) -> None:
+    """Move plugin pins in a POM that Maven will inherit from the private repo."""
+    if not toolchain or not dest.is_file():
+        return
+    try:
+        tree = parse_xml(dest)
+    except (OSError, ET.ParseError):
+        return
+    root = tree.getroot()
+    if local_name(root.tag) != "project":
+        return
+    pinned = pin_toolchain_plugins(root, index, toolchain, source=str(dest))
+    if pinned.changes:
+        write_xml(tree, dest)
 
 
 def _looks_like_xml(path: Path) -> bool:

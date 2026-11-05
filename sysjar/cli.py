@@ -15,7 +15,7 @@ from sysjar.install import install_auto, install_pom, parse_alias, write_filelis
 from sysjar.ivy import write_ivy_settings
 from sysjar.model import SysjarError, parse_coord
 from sysjar.pom import rewrite_tree
-from sysjar.repo import default_repo, materialize
+from sysjar.repo import default_repo, materialize, toolchain_plugin_versions
 from sysjar.rpmmeta import load_record, open_packaged, provides_for, requires_for
 from sysjar.scan import build_requires, scan
 
@@ -187,7 +187,9 @@ def _run(args: argparse.Namespace) -> int:
                 bad += 1
         return 1 if bad else 0
     if cmd == "rewrite":
-        report = rewrite_tree(args.path, index, drop=set(args.drop))
+        report = rewrite_tree(
+            args.path, index, drop=set(args.drop), toolchain=toolchain_plugin_versions(),
+        )
         return _report(report, quiet, fail_blocking=True)
     if cmd == "ivy-settings":
         dest = args.dest

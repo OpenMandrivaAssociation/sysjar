@@ -11,7 +11,7 @@ from pathlib import Path
 
 from sysjar.cli import main
 from sysjar.gradle import render_init_script
-from sysjar.index import load_index
+from sysjar.index import export_parent_poms, load_index
 from sysjar.install import filelist_lines, install_auto, install_pom
 from sysjar.ivy import rewrite_ivy_element
 from sysjar.model import Artifact, Coord, Dependency, Index, SysjarError, version_key
@@ -232,6 +232,42 @@ class IndexTests(unittest.TestCase):
         written = parse_xml(pom)
         parent = child(written.getroot(), "parent")
         self.assertEqual(text_of(parent, "version"), "35.MBI")
+
+    def test_shipped_parent_poms_resolve_without_the_bootstrap_package(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        bootstrap = root / "bootstrap"
+        pom_path = bootstrap / "apache.pom"
+        pom_path.parent.mkdir(parents=True)
+        pom_path.write_text("<project/>", encoding="utf-8")
+        jar = bootstrap / "only.jar"
+        jar.write_bytes(b"only")
+        meta = bootstrap / "maven-metadata"
+        meta.mkdir()
+        (meta / "boot.xml").write_text(f"""<?xml version="1.0" ?>
+<metadata><artifacts>
+  <artifact>
+    <groupId>org.apache</groupId><artifactId>apache</artifactId>
+    <extension>pom</extension>
+    <version>35.MBI</version><path>{pom_path}</path>
+  </artifact>
+  <artifact>
+    <groupId>org.example</groupId><artifactId>only-boot</artifactId>
+    <version>1.0.0.MBI</version><path>{jar}</path>
+  </artifact>
+</artifacts></metadata>
+""", encoding="utf-8")
+        dest = root / "out"
+        self.assertEqual(export_parent_poms(bootstrap, dest), 1)
+        self.assertFalse((dest / "only.jar").exists())
+        installed = root / "sysroot"
+        shutil.copytree(dest, installed / "usr/share/sysjar/parents")
+        index = load_index([installed])
+        found = index.find_pom("org.apache", "apache")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.version, "35.MBI")
+        self.assertEqual(found.priority, 0)
+        self.assertIsNone(index.find("org.example", "only-boot"))
 
     def test_scan_treats_a_pom_parent_as_present(self):
         root = Path(tempfile.mkdtemp())
@@ -1237,6 +1273,178 @@ class RepoTests(unittest.TestCase):
         self.assertEqual(link.resolve(), jar.resolve())
         self.assertEqual(kept.read_text(encoding="utf-8"), "kept")
         overlay_repo(root / "missing", dest)
+
+    def test_toolchain_plugin_pin_replaces_a_project_version_not_a_library(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        tool = root / "tool"
+        base = tool / "org/apache/maven/plugins/maven-resources-plugin"
+        (base / "3.3.1.MBI").mkdir(parents=True)
+        (base / "3.3.1.MBI" / "maven-resources-plugin-3.3.1.MBI.pom").write_text(
+            """<?xml version="1.0" encoding="utf-8"?>
+<project><groupId>org.apache.maven.plugins</groupId>
+<artifactId>maven-resources-plugin</artifactId>
+<version>3.3.1.MBI</version><packaging>maven-plugin</packaging></project>
+""",
+            encoding="utf-8",
+        )
+        (base / "maven-metadata.xml").write_text(
+            """<?xml version="1.0" encoding="utf-8"?>
+<metadata><groupId>org.apache.maven.plugins</groupId>
+<artifactId>maven-resources-plugin</artifactId>
+<versioning><latest>3.3.1.MBI</latest></versioning></metadata>
+""",
+            encoding="utf-8",
+        )
+        lib = tool / "commons-io/commons-io"
+        (lib / "2.20.0.MBI").mkdir(parents=True)
+        (lib / "2.20.0.MBI" / "commons-io-2.20.0.MBI.pom").write_text(
+            "<project><groupId>commons-io</groupId><artifactId>commons-io</artifactId>"
+            "<version>2.20.0.MBI</version><packaging>jar</packaging></project>",
+            encoding="utf-8",
+        )
+        (lib / "maven-metadata.xml").write_text(
+            """<?xml version="1.0" encoding="utf-8"?>
+<metadata><groupId>commons-io</groupId><artifactId>commons-io</artifactId>
+<versioning><latest>2.20.0.MBI</latest></versioning></metadata>
+""",
+            encoding="utf-8",
+        )
+        from sysjar.repo import toolchain_plugin_versions
+        versions = toolchain_plugin_versions(tool)
+        self.assertEqual(
+            versions,
+            {("org.apache.maven.plugins", "maven-resources-plugin"): "3.3.1.MBI"},
+        )
+        project = root / "proj"
+        project.mkdir()
+        (project / "pom.xml").write_text(
+            """<?xml version="1.0" encoding="utf-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId>
+  <artifactId>demo</artifactId>
+  <version>1</version>
+  <properties>
+    <maven-resources-plugin.version>3.3.1</maven-resources-plugin.version>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>commons-io</groupId>
+      <artifactId>commons-io</artifactId>
+      <version>2.16.1</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-resources-plugin</artifactId>
+          <version>${maven-resources-plugin.version}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+</project>
+""",
+            encoding="utf-8",
+        )
+        from sysjar import build as buildmod
+        previous = buildmod.TOOLCHAIN_REPO
+        buildmod.TOOLCHAIN_REPO = tool
+        self.addCleanup(setattr, buildmod, "TOOLCHAIN_REPO", previous)
+        prepare_maven(project, Index(), project / ".sysjar" / "work")
+        text = (project / "pom.xml").read_text(encoding="utf-8")
+        self.assertIn(">3.3.1.MBI<", text)
+        self.assertIn(">2.16.1<", text)
+        packaged = Index()
+        packaged.add(artifact(
+            "org.apache.maven.plugins", "maven-resources-plugin", "3.3.1",
+            str(root / "installed.jar"),
+        ))
+        (root / "installed.jar").write_bytes(b"jar")
+        project2 = root / "proj2"
+        project2.mkdir()
+        (project2 / "pom.xml").write_text((project / "pom.xml").read_text(encoding="utf-8"), encoding="utf-8")
+        prepare_maven(project2, packaged, project2 / ".sysjar" / "work")
+        pinned = text_of(
+            child(
+                child(
+                    child(child(parse_xml(project2 / "pom.xml").getroot(), "build"), "pluginManagement"),
+                    "plugins",
+                ),
+                "plugin",
+            ),
+            "version",
+        )
+        self.assertEqual(pinned, "3.3.1")
+
+    def test_parent_pom_in_the_repo_gets_the_toolchain_pin(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        tool = root / "tool"
+        base = tool / "org/apache/maven/plugins/maven-resources-plugin"
+        (base / "3.3.1.MBI").mkdir(parents=True)
+        (base / "3.3.1.MBI" / "maven-resources-plugin-3.3.1.MBI.pom").write_text(
+            "<project><packaging>maven-plugin</packaging></project>",
+            encoding="utf-8",
+        )
+        (base / "maven-metadata.xml").write_text(
+            """<?xml version="1.0" encoding="utf-8"?>
+<metadata><groupId>org.apache.maven.plugins</groupId>
+<artifactId>maven-resources-plugin</artifactId>
+<versioning><latest>3.3.1.MBI</latest></versioning></metadata>
+""",
+            encoding="utf-8",
+        )
+        parent = root / "commons-parent.pom"
+        parent.write_text(
+            """<?xml version="1.0" encoding="utf-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.apache.commons</groupId>
+  <artifactId>commons-parent</artifactId>
+  <version>89</version>
+  <packaging>pom</packaging>
+  <build><pluginManagement><plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-resources-plugin</artifactId>
+      <version>2.6</version>
+    </plugin>
+  </plugins></pluginManagement></build>
+</project>
+""",
+            encoding="utf-8",
+        )
+        index = Index()
+        index.add(artifact(
+            "org.apache.commons", "commons-parent", "89", "", str(parent), extension="pom",
+        ))
+        from sysjar import build as buildmod
+        previous = buildmod.TOOLCHAIN_REPO
+        buildmod.TOOLCHAIN_REPO = tool
+        self.addCleanup(setattr, buildmod, "TOOLCHAIN_REPO", previous)
+        project = root / "proj"
+        project.mkdir()
+        (project / "pom.xml").write_text(
+            """<?xml version="1.0" encoding="utf-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId><artifactId>demo</artifactId><version>1</version>
+</project>
+""",
+            encoding="utf-8",
+        )
+        prepare_maven(project, index, project / ".sysjar" / "work")
+        copied = (
+            project / ".sysjar/work/repo/org/apache/commons/commons-parent/89/commons-parent-89.pom"
+        )
+        text = copied.read_text(encoding="utf-8")
+        self.assertIn(">3.3.1.MBI<", text)
+        self.assertNotIn(">2.6<", text)
+        self.assertEqual(parent.read_text(encoding="utf-8").count(">2.6<"), 1)
 
     def test_prepare_maven_overlays_the_toolchain(self):
         root = Path(tempfile.mkdtemp())

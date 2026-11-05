@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -40,13 +41,22 @@ def load_bootstrap_poms(index: Index, root: Path) -> None:
     A coordinate that also has a jar is a library or a plugin. Indexing its
     POM would publish a generated model at the same path as the lifecycle
     toolchain, and that model has no dependency versions.
+
+    The same parents are also read from /usr/share/sysjar/parents. A normal
+    Maven build does not install the bootstrap package, and sysjar ships
+    the pom-only coordinates so a parent such as org.apache:apache still
+    resolves.
     """
-    directory = root / "usr/share/javapackages-bootstrap/maven-metadata"
-    if not directory.is_dir():
-        return
+    directories = [
+        root / "usr/share/javapackages-bootstrap/maven-metadata",
+        root / "usr/share/sysjar/parents/maven-metadata",
+    ]
     found = []
-    for path in sorted(directory.glob("*.xml")):
-        found.extend(artifacts_from_xmvn(path, root, priority=0))
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*.xml")):
+            found.extend(artifacts_from_xmvn(path, root, priority=0))
     jars = {
         (art.coord.group, art.coord.artifact)
         for art in found
@@ -59,6 +69,61 @@ def load_bootstrap_poms(index: Index, root: Path) -> None:
         if (art.coord.group, art.coord.artifact) in jars:
             continue
         index.add(art)
+
+
+def export_parent_poms(bootstrap: Path, dest: Path) -> int:
+    """Copy pom-only parents out of a javapackages-bootstrap directory.
+
+    dest receives the POM files and a metadata file whose paths point at
+    /usr/share/sysjar/parents. Jar artifacts are left behind.
+    """
+    meta_dir = bootstrap / "maven-metadata"
+    if not meta_dir.is_dir():
+        raise SystemExit(f"no maven-metadata under {bootstrap}")
+    found = []
+    for path in sorted(meta_dir.glob("*.xml")):
+        found.extend(artifacts_from_xmvn(path, Path("/"), priority=0))
+    jars = {
+        (art.coord.group, art.coord.artifact)
+        for art in found
+        if not art.coord.classifier and (art.coord.extension or "jar") != "pom"
+    }
+    parents = []
+    for art in found:
+        extension = art.coord.extension or "jar"
+        if extension != "pom" or art.coord.classifier:
+            continue
+        if (art.coord.group, art.coord.artifact) in jars:
+            continue
+        if not art.pom or not Path(art.pom).is_file():
+            continue
+        parents.append(art)
+    if not parents:
+        raise SystemExit(f"no parent POMs under {bootstrap}")
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "maven-metadata").mkdir(parents=True, exist_ok=True)
+    lines = ['<?xml version="1.0" encoding="utf-8"?>', "<metadata><artifacts>"]
+    for art in parents:
+        name = Path(art.pom).name
+        shutil.copyfile(art.pom, dest / name)
+        lines.append("  <artifact>")
+        lines.append(f"    <groupId>{_xml(art.coord.group)}</groupId>")
+        lines.append(f"    <artifactId>{_xml(art.coord.artifact)}</artifactId>")
+        lines.append("    <extension>pom</extension>")
+        lines.append(f"    <version>{_xml(art.version)}</version>")
+        lines.append(f"    <path>/usr/share/sysjar/parents/{_xml(name)}</path>")
+        lines.append("  </artifact>")
+    lines.append("</artifacts></metadata>")
+    (dest / "maven-metadata" / "parents.xml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(parents)
+
+
+def _xml(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
 
 def load_sysjar_tree(index: Index, root: Path) -> None:

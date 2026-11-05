@@ -890,6 +890,44 @@ def rewrite_path(
     return report
 
 
+def pin_toolchain_plugins(
+    root: ET.Element,
+    index: Index,
+    versions: dict[tuple[str, str], str],
+    *,
+    source: str = "",
+) -> Report:
+    """Point plugins that are not installed at the toolchain copy.
+
+    A project often pins maven-resources-plugin to 3.3.1. The toolchain
+    ships 3.3.1.MBI, and Maven looks up the pin before its own binding.
+    An installed jar wins, so this does not hide a packaged plugin.
+    """
+    report = Report()
+    if not versions:
+        return report
+    props = pom_properties(root)
+    for plugin in root.iter():
+        if local_name(plugin.tag) != "plugin":
+            continue
+        group = expand(text_of(plugin, "groupId"), props) or "org.apache.maven.plugins"
+        artifact = expand(text_of(plugin, "artifactId"), props)
+        if not artifact or "${" in group or "${" in artifact:
+            continue
+        want = versions.get((group, artifact))
+        if not want:
+            continue
+        if index.find(group, artifact, "", "jar") is not None:
+            continue
+        current = expand(text_of(plugin, "version"), props)
+        if current == want:
+            continue
+        upsert(plugin, "version", want, after=("artifactId", "groupId"))
+        shown = current or "(unset)"
+        report.changes.append(f"{source}: toolchain {group}:{artifact} {shown} -> {want}")
+    return report
+
+
 def pin_lifecycle_plugins(
     root: ET.Element,
     index: Index,
@@ -958,6 +996,7 @@ def rewrite_tree(
     drop: set[str] | None = None,
     reactor_only: bool = False,
     lifecycle: dict[tuple[str, str], str] | None = None,
+    toolchain: dict[tuple[str, str], str] | None = None,
 ) -> Report:
     reactor_map = discover_reactor(root if root.is_dir() else root.parent)
     reactor = set(reactor_map)
@@ -976,15 +1015,24 @@ def rewrite_tree(
                 path, index, reactor=reactor, drop=drop, inplace=True, managed=managed,
                 strip_uninstalled=True,
             ))
+            tree = parse_xml(path)
+            if local_name(tree.getroot().tag) != "project":
+                continue
+            changed = False
             if lifecycle:
-                tree = parse_xml(path)
-                if local_name(tree.getroot().tag) == "project":
-                    pinned = pin_lifecycle_plugins(
-                        tree.getroot(), index, lifecycle, source=str(path), managed=managed,
-                    )
-                    if pinned.changes:
-                        write_xml(tree, path)
-                    report.extend(pinned)
+                pinned = pin_lifecycle_plugins(
+                    tree.getroot(), index, lifecycle, source=str(path), managed=managed,
+                )
+                changed = bool(pinned.changes)
+                report.extend(pinned)
+            if toolchain:
+                pinned = pin_toolchain_plugins(
+                    tree.getroot(), index, toolchain, source=str(path),
+                )
+                changed = changed or bool(pinned.changes)
+                report.extend(pinned)
+            if changed:
+                write_xml(tree, path)
         except (OSError, ET.ParseError) as exc:
             # A fixture POM that is not well-formed XML must not abort the build.
             report.changes.append(f"{path}: skipped unreadable file ({exc})")
