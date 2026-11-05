@@ -1790,6 +1790,74 @@ class RepoTests(unittest.TestCase):
         self.assertTrue(any("build-helper-maven-plugin" in line for line in report.dropped))
         self.assertFalse(report.blocking)
 
+    def test_dropped_bundle_plugin_does_not_leave_its_manifest_path(self):
+        root = pom("""
+  <groupId>org.joda</groupId>
+  <artifactId>joda-convert</artifactId>
+  <version>3.0.1</version>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.felix</groupId>
+        <artifactId>maven-bundle-plugin</artifactId>
+        <version>5.1.9</version>
+        <executions>
+          <execution>
+            <goals><goal>manifest</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+        <configuration>
+          <archive>
+            <manifestFile>${project.build.outputDirectory}/META-INF/MANIFEST.MF</manifestFile>
+            <manifest>
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+""")
+        report = rewrite_element(root, Index(), strip_uninstalled=True)
+        text = ET.tostring(root, encoding="unicode")
+        self.assertNotIn("maven-bundle-plugin", text)
+        self.assertNotIn("manifestFile", text)
+        self.assertIn("addDefaultImplementationEntries", text)
+        self.assertTrue(any("manifestFile" in line for line in report.changes))
+
+    def test_installed_bundle_plugin_keeps_its_manifest_path(self):
+        root = pom("""
+  <groupId>org.joda</groupId>
+  <artifactId>joda-convert</artifactId>
+  <version>3.0.1</version>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.felix</groupId>
+        <artifactId>maven-bundle-plugin</artifactId>
+        <version>5.1.9</version>
+      </plugin>
+      <plugin>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+        <configuration>
+          <archive>
+            <manifestFile>${project.build.outputDirectory}/META-INF/MANIFEST.MF</manifestFile>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+""")
+        index = Index()
+        index.add(artifact("org.apache.felix", "maven-bundle-plugin", "5.1.9", "/bundle.jar"))
+        rewrite_element(root, index, strip_uninstalled=True)
+        self.assertIn("manifestFile", ET.tostring(root, encoding="unicode"))
+
     def test_published_pom_raises_compiler_level_and_keeps_plugins(self):
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root)

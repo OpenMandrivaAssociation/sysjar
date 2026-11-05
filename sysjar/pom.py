@@ -657,7 +657,32 @@ def rewrite_element(
             )
         if hit.kind == "parent" and (hit.group, hit.artifact) not in reactor:
             _clear_relative_path(hit.elem)
+    _drop_orphaned_bundle_manifest(root, report, source)
     return report
+
+
+def _drop_orphaned_bundle_manifest(root: ET.Element, report: Report, source: str) -> None:
+    """jar:jar fails if it still points at a manifest the bundle plugin never wrote.
+
+    Dropping an uninstalled maven-bundle-plugin leaves that path in the jar
+    plugin. The jar is then packed with the manifest configuration that remains.
+    """
+    if not any("maven-bundle-plugin" in line for line in report.dropped):
+        return
+    removed = False
+
+    def walk(elem: ET.Element) -> None:
+        nonlocal removed
+        for item in list(elem):
+            if local_name(item.tag) == "manifestFile":
+                remove_node(root, item)
+                removed = True
+            else:
+                walk(item)
+
+    walk(root)
+    if removed:
+        report.changes.append(f"{source}: removed manifestFile left by maven-bundle-plugin")
 
 
 def _managed_plugin_versions(root: ET.Element, group: str, artifact: str) -> list[str]:
