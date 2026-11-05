@@ -17,6 +17,11 @@ def load_index(roots: list[Path] | None = None, bootstrap_roots: list[Path] | No
     so a new package replaces a stale fragment of the same version.
     javapackages-bootstrap metadata is priority 0: it fills coordinates that
     no real package provides, and a packaged jar always wins.
+
+    Without an explicit bootstrap root, only parent POMs are loaded from
+    that tree. A model cannot be built without its parent. Jars stay out,
+    because one bootstrap version would satisfy a dependency the
+    distribution has not packaged.
     """
     index = Index()
     for root in bootstrap_roots or []:
@@ -24,7 +29,36 @@ def load_index(roots: list[Path] | None = None, bootstrap_roots: list[Path] | No
     for root in roots if roots is not None else [Path("/")]:
         load_xmvn_tree(index, root)
         load_sysjar_tree(index, root)
+        if not bootstrap_roots:
+            load_bootstrap_poms(index, root)
     return index
+
+
+def load_bootstrap_poms(index: Index, root: Path) -> None:
+    """Parent POMs from javapackages-bootstrap. Jars in that tree are ignored.
+
+    A coordinate that also has a jar is a library or a plugin. Indexing its
+    POM would publish a generated model at the same path as the lifecycle
+    toolchain, and that model has no dependency versions.
+    """
+    directory = root / "usr/share/javapackages-bootstrap/maven-metadata"
+    if not directory.is_dir():
+        return
+    found = []
+    for path in sorted(directory.glob("*.xml")):
+        found.extend(artifacts_from_xmvn(path, root, priority=0))
+    jars = {
+        (art.coord.group, art.coord.artifact)
+        for art in found
+        if not art.coord.classifier and (art.coord.extension or "jar") != "pom"
+    }
+    for art in found:
+        extension = art.coord.extension or "jar"
+        if extension != "pom" or art.coord.classifier:
+            continue
+        if (art.coord.group, art.coord.artifact) in jars:
+            continue
+        index.add(art)
 
 
 def load_sysjar_tree(index: Index, root: Path) -> None:

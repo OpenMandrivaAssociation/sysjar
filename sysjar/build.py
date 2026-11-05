@@ -11,7 +11,7 @@ from sysjar.gradle import write_init_script
 from sysjar.ivy import find_ivy_files, write_ivy_settings
 from sysjar.model import Index, version_key
 from sysjar.pom import Report, rewrite_path, rewrite_tree
-from sysjar.repo import materialize, write_settings
+from sysjar.repo import TOOLCHAIN_REPO, materialize, overlay_repo, write_settings
 
 # group:artifact:version:goal, as Maven writes it in default-bindings.xml.
 _PHASE_PLUGIN = re.compile(
@@ -68,6 +68,9 @@ def prepare_maven(
     )
     repo = work / "repo"
     warnings = materialize(index, repo, drop=drop)
+    # Lifecycle plugins are not indexed. Link the ones Maven itself binds
+    # after the index, so an indexed jar of the same path wins.
+    overlay_repo(TOOLCHAIN_REPO, repo)
     settings = work / "settings.xml"
     write_settings(settings, repo)
     local = work / "local"

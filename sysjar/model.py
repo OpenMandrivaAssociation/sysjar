@@ -272,6 +272,10 @@ class Index:
 
         for art in self.artifacts():
             extension = art.coord.extension or "jar"
+            # A bootstrap parent POM is not a library. Gradle must not
+            # substitute a jar dependency onto that version.
+            if art.priority == 0 and extension == "pom" and not art.coord.classifier:
+                continue
             if art.coord.classifier == "" and extension in JAR_LIKE:
                 rank = 2
             elif extension == "pom" and art.coord.classifier == "":

@@ -77,6 +77,16 @@ that switch ignores a file repository as well as the network. The
 settings mirror every repository at the private one, so a missing jar
 fails the build instead of being downloaded. A missing compile or runtime dependency
 stops the command before Maven starts.
+.PP
+Maven's default lifecycle plugins are not packages. When
+.I /usr/share/maven/toolchain
+exists, files there are linked into the private repository wherever
+the index did not already publish a file. A later link does not replace
+an index file. Those jars are not indexed, so a project dependency is
+still missing when the distribution has not packaged it. Parent POMs
+from javapackages-bootstrap fill a coordinate that no package provides.
+Bootstrap jars are not loaded that way.
+.PP
 A plugin or build extension that is not installed is removed from the
 project being built, except a plugin that produces the main artifact
 (compiler, resources, jar, war, ear, assembly, shade, antrun, bundle,

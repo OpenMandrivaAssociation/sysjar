@@ -16,6 +16,34 @@ def default_repo() -> Path:
     return Path("/var/cache/sysjar/m2")
 
 
+# Maven's default lifecycle plugins. Not part of the index: priority 1 and
+# above ignore the version a build asked for, so indexing these jars would
+# satisfy every request and hide a missing BuildRequires.
+TOOLCHAIN_REPO = Path("/usr/share/maven/toolchain")
+
+
+def overlay_repo(source: Path, dest: Path) -> None:
+    """Symlink a prebuilt repository into dest. A file already at dest wins.
+
+    A missing source is not an error. The toolchain package may be older
+    than sysjar, and a build then fails in Maven with the plugin name.
+    """
+    if not source.is_dir():
+        return
+    dest.mkdir(parents=True, exist_ok=True)
+    for path in sorted(source.rglob("*")):
+        if path.is_dir():
+            continue
+        relative = path.relative_to(source)
+        if any(part in {"", ".", ".."} for part in relative.parts):
+            continue
+        target = dest.joinpath(*relative.parts)
+        if target.exists() or target.is_symlink():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(path.resolve())
+
+
 def materialize(index: Index, dest: Path, *, drop: set[str] | None = None) -> list[str]:
     """Write a Maven repository at dest. Jars are symlinks. POMs are rewritten copies.
 

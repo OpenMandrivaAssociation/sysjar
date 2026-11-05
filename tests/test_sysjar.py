@@ -15,12 +15,12 @@ from sysjar.index import load_index
 from sysjar.install import filelist_lines, install_auto, install_pom
 from sysjar.ivy import rewrite_ivy_element
 from sysjar.model import Artifact, Coord, Dependency, Index, SysjarError, version_key
-from sysjar.build import lifecycle_defaults
+from sysjar.build import lifecycle_defaults, prepare_maven
 from sysjar.pom import (
     drop_raw_compiler_levels, fix_snapshot_versions, pin_lifecycle_plugins, raise_compiler_level,
     rewrite_element, runtime_dependencies,
 )
-from sysjar.repo import materialize, write_settings
+from sysjar.repo import materialize, overlay_repo, write_settings
 from sysjar.rpmmeta import provides_for, requires_for
 from sysjar.scan import build_requires, scan
 from sysjar.xmlutil import POM_NS, child, children, parse_xml, text_of, write_xml
@@ -167,6 +167,71 @@ class IndexTests(unittest.TestCase):
         index.add(artifact("org.slf4j", "slf4j-api", "1.7.36", "/system.jar", priority=1))
         self.assertEqual(index.find("org.slf4j", "slf4j-api", requested="2.0.17").path, "/system.jar")
         self.assertEqual(len(index.publishable()), 1)
+
+    def test_bootstrap_parent_pom_is_used_and_its_jars_are_not(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        pom_path = root / "usr/share/javapackages-bootstrap/apache.pom"
+        pom_path.parent.mkdir(parents=True)
+        pom_path.write_text("<project/>", encoding="utf-8")
+        jar = root / "usr/share/javapackages-bootstrap/only.jar"
+        jar.write_bytes(b"only")
+        plugin_pom = root / "usr/share/javapackages-bootstrap/plugin.pom"
+        plugin_pom.write_text("Dummy POM file for the plugin\n", encoding="utf-8")
+        plugin_jar = root / "usr/share/javapackages-bootstrap/plugin.jar"
+        plugin_jar.write_bytes(b"plugin")
+        meta = root / "usr/share/javapackages-bootstrap/maven-metadata"
+        meta.mkdir()
+        (meta / "boot.xml").write_text(f"""<?xml version="1.0" ?>
+<metadata><artifacts>
+  <artifact>
+    <groupId>org.apache</groupId><artifactId>apache</artifactId>
+    <extension>pom</extension>
+    <version>35.MBI</version><path>{pom_path}</path>
+  </artifact>
+  <artifact>
+    <groupId>org.example</groupId><artifactId>only-boot</artifactId>
+    <version>1.0.0.MBI</version><path>{jar}</path>
+  </artifact>
+  <artifact>
+    <groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId>
+    <extension>pom</extension>
+    <version>3.3.1.MBI</version><path>{plugin_pom}</path>
+  </artifact>
+  <artifact>
+    <groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId>
+    <version>3.3.1.MBI</version><path>{plugin_jar}</path>
+  </artifact>
+</artifacts></metadata>
+""", encoding="utf-8")
+        index = load_index([root])
+        found = index.find_pom("org.apache", "apache")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.version, "35.MBI")
+        self.assertEqual(found.priority, 0)
+        self.assertIsNone(index.find("org.example", "only-boot"))
+        self.assertIsNone(index.find_pom("org.apache.maven.plugins", "maven-resources-plugin"))
+        self.assertNotIn("org.apache:apache", index.version_map())
+        project = root / "proj"
+        project.mkdir()
+        pom = project / "pom.xml"
+        pom.write_text("""<?xml version="1.0" encoding="utf-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.apache</groupId>
+    <artifactId>apache</artifactId>
+    <version>40</version>
+  </parent>
+  <artifactId>demo</artifactId>
+</project>
+""", encoding="utf-8")
+        from sysjar.pom import rewrite_path
+        report = rewrite_path(pom, index)
+        self.assertEqual(report.blocking, [])
+        written = parse_xml(pom)
+        parent = child(written.getroot(), "parent")
+        self.assertEqual(text_of(parent, "version"), "35.MBI")
 
     def test_scan_treats_a_pom_parent_as_present(self):
         root = Path(tempfile.mkdtemp())
@@ -1149,6 +1214,55 @@ class RepoTests(unittest.TestCase):
         text = settings.read_text(encoding="utf-8")
         self.assertNotIn("<offline>true</offline>", text)
         self.assertIn("<mirrorOf>*</mirrorOf>", text)
+
+    def test_overlay_repo_fills_gaps_and_keeps_existing_files(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        source = root / "tool"
+        jar = source / "org/example/demo/1.0/demo-1.0.jar"
+        jar.parent.mkdir(parents=True)
+        jar.write_bytes(b"tool")
+        (source / "org/example/demo/1.0/demo-1.0.pom").write_text("from-tool", encoding="utf-8")
+        dest = root / "repo"
+        kept = dest / "org/example/demo/1.0/demo-1.0.pom"
+        kept.parent.mkdir(parents=True)
+        kept.write_text("kept", encoding="utf-8")
+        overlay_repo(source, dest)
+        link = dest / "org/example/demo/1.0/demo-1.0.jar"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.read_bytes(), b"tool")
+        self.assertEqual(kept.read_text(encoding="utf-8"), "kept")
+        jar.write_bytes(b"changed")
+        overlay_repo(source, dest)
+        self.assertEqual(link.resolve(), jar.resolve())
+        self.assertEqual(kept.read_text(encoding="utf-8"), "kept")
+        overlay_repo(root / "missing", dest)
+
+    def test_prepare_maven_overlays_the_toolchain(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        project = root / "proj"
+        project.mkdir()
+        (project / "pom.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId>
+  <artifactId>demo</artifactId>
+  <version>1</version>
+</project>
+""", encoding="utf-8")
+        tool = root / "tool"
+        jar = tool / "org/example/plugin/1.0/plugin-1.0.jar"
+        jar.parent.mkdir(parents=True)
+        jar.write_bytes(b"plugin")
+        from sysjar import build as buildmod
+        previous = buildmod.TOOLCHAIN_REPO
+        buildmod.TOOLCHAIN_REPO = tool
+        self.addCleanup(setattr, buildmod, "TOOLCHAIN_REPO", previous)
+        prepare_maven(project, Index(), project / ".sysjar" / "work")
+        link = project / ".sysjar/work/repo/org/example/plugin/1.0/plugin-1.0.jar"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.read_bytes(), b"plugin")
 
     def test_drop_removes_a_parent_profile_plugin_from_the_published_pom(self):
         root = Path(tempfile.mkdtemp())
